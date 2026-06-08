@@ -660,6 +660,33 @@
   (setq n (fix (+ x 0.5)))
   (= (rem n 10) 5)
 )
+(defun _longitud-modular-encofrado (x / n)
+  ;; Las piezas industriales modulan cada 5 cm. El sobrante se resuelve
+  ;; con madera y no forma parte del despiece ni del stock.
+  (if (and x (> x 0.0))
+    (progn
+      (setq n (fix (/ (+ x 1e-6) 5.0)))
+      (* 5.0 n)
+    )
+    0.0
+  )
+)
+
+(defun _longitud-madera-encofrado (x / modular resto)
+  (setq modular (_longitud-modular-encofrado x))
+  (setq resto (- x modular))
+  (if (> resto 1e-6) resto 0.0)
+)
+
+(defun _extremo-madera-pano (res)
+  ;; La madera se coloca junto a la esquina, nunca en el extremo libre.
+  ;; Si el muro tiene esquinas en ambos extremos, se prioriza INICIO.
+  (cond
+    ((cdr (assoc "INICIO" res)) "INICIO")
+    ((cdr (assoc "FINAL" res))  "FINAL")
+    (T "INICIO")
+  )
+)
 (defun _fmt-real (v)
   (if v (rtos v 2 2) "-")
 )
@@ -5255,18 +5282,19 @@
 (defun _panel-a-item-despiece (pieza muro cara)
   (_pieza-despiece pieza 1 "RECTO" (_muro-id muro) "-" cara)
 )
-(defun _generar-items-paneles-cara (muro res lista cara / altura longitudUtil sol bandas usosBanda items u)
+(defun _generar-items-paneles-cara (muro res lista cara / altura longitudUtil longitudModular sol bandas usosBanda items u)
   (setq items '())
   (setq altura (_altura-real-muro muro))
 
   (if altura
     (progn
       (setq longitudUtil (_longitud-util-cara-muro muro res lista cara))
+      (setq longitudModular (_longitud-modular-encofrado longitudUtil))
 
-      (if (> longitudUtil 0.0)
+      (if (> longitudModular 0.0)
         (progn
           ; usar el resolvedor bueno del pao
-          (setq sol (_resolver-panyo-reglas longitudUtil altura))
+          (setq sol (_resolver-panyo-reglas longitudModular altura))
 
           (if sol
             (progn
@@ -5290,7 +5318,8 @@
                 "\nERROR: no se pudo resolver el tramo recto del Muro "
                 (itoa (_muro-id muro))
                 " | Cara: " cara
-                " | Longitud util: " (rtos longitudUtil 2 2)
+                " | Longitud modular: " (rtos longitudModular 2 2)
+                " | Madera: " (rtos (_longitud-madera-encofrado longitudUtil) 2 2)
                 " | Altura real: " (rtos altura 2 2)
               )
             )
@@ -5372,7 +5401,8 @@
 ; =========================================================
 (defun _generar-colocaciones-cara-recta (muro res lista cara / altura
                                               linea p0 p1 ang
-                                              sol bandas longUtil
+                                              sol bandas longUtil longModular
+                                              madera extremoMadera sOrigen
                                               zBase bIdx b usosBanda
                                               sAcum sBaseLong consumoHoriz
                                               z0 z1 uso pieza bloque
@@ -5393,8 +5423,19 @@
           (setq ang (angle p0 p1))
 
           (setq longUtil (_longitud-util-cara-muro muro res lista cara))
-          (setq longUtil (float (fix (+ longUtil 0.5))))
-          (setq sol (_resolver-panyo-reglas longUtil altura))
+          (setq longModular (_longitud-modular-encofrado longUtil))
+          (setq madera (_longitud-madera-encofrado longUtil))
+          (setq extremoMadera (_extremo-madera-pano res))
+          (setq sOrigen
+            (if (and (> madera 0.0) (= extremoMadera "INICIO"))
+              madera
+              0.0
+            )
+          )
+          (if (> longModular 0.0)
+            (setq sol (_resolver-panyo-reglas longModular altura))
+            (setq sol nil)
+          )
 
           (if sol
             (progn
@@ -5402,7 +5443,7 @@
               (setq bandas (_sol-panyo-bandas sol))
               (setq zBase 0.0)
               (setq bIdx 0)
-              (setq sBaseLong 0.0)
+              (setq sBaseLong sOrigen)
               (setq consumoHoriz 0.0)
               (setq bandaAnteriorHorizontal nil)
 
@@ -5498,7 +5539,7 @@
                     (setq zBase z1)
 
                     ;; Tras una banda vertical, la siguiente vuelve al inicio.
-                    (setq sBaseLong 0.0)
+                    (setq sBaseLong sOrigen)
                   )
                 )
 
@@ -5693,6 +5734,123 @@
     )
   )
   res
+)
+
+; =========================================================
+; TRAMOS DE MADERA PARA MEDIDAS NO MODULARES
+; No forman parte del despiece, stock ni tornilleria.
+; =========================================================
+
+(defun _hacer-colocacion-madera (muro cara extremo s0 s1 p0 p1 altura)
+  (list
+    (cons "PIEZA" nil)
+    (cons "MURO" (_muro-id muro))
+    (cons "CARA" cara)
+    (cons "BANDA" 0)
+    (cons "S0" s0)
+    (cons "S1" s1)
+    (cons "Z0" 0.0)
+    (cons "Z1" altura)
+    (cons "P0" p0)
+    (cons "P1" p1)
+    (cons "ANG" (angle p0 p1))
+    (cons "GIRO_USO" "NO")
+    (cons "BLOQUE" nil)
+    (cons "ORIGEN" "MADERA")
+    (cons "ORIGEN_BANDA" "MADERA")
+    (cons "EXTREMO" extremo)
+  )
+)
+
+(defun _generar-colocacion-madera-cara (muro res lista cara /
+                                         linea p0 p1 longitud modular resto altura
+                                         extremo s0 s1)
+  (setq linea (_linea-cara-ajustada muro res lista cara))
+  (setq altura (_altura-real-muro muro))
+
+  (if (and linea altura)
+    (progn
+      (setq p0 (nth 0 linea))
+      (setq p1 (nth 1 linea))
+      (setq longitud (_longitud-util-cara-muro muro res lista cara))
+      (setq modular (_longitud-modular-encofrado longitud))
+      (setq resto (_longitud-madera-encofrado longitud))
+      (setq extremo (_extremo-madera-pano res))
+
+      (if (> resto 0.0)
+        (progn
+          (if (= extremo "INICIO")
+            (progn
+              (setq s0 0.0)
+              (setq s1 resto)
+            )
+            (progn
+              (setq s0 modular)
+              (setq s1 longitud)
+            )
+          )
+
+          (_hacer-colocacion-madera
+            muro
+            cara
+            extremo
+            s0
+            s1
+            (_punto-en-linea-por-distancia p0 p1 s0)
+            (_punto-en-linea-por-distancia p0 p1 s1)
+            altura
+          )
+        )
+        nil
+      )
+    )
+    nil
+  )
+)
+
+(defun _generar-colocaciones-madera (lista / res muro aj caras col)
+  (setq res '())
+
+  (foreach muro lista
+    (setq aj (_ajustar-muro-por-extremos-v2 muro lista))
+    (setq caras (nth 8 muro))
+
+    (if (member caras '(1 2))
+      (progn
+        (setq col (_generar-colocacion-madera-cara muro aj lista "BASE"))
+        (if col (setq res (append res (list col))))
+      )
+    )
+
+    (if (= caras 2)
+      (progn
+        (setq col (_generar-colocacion-madera-cara muro aj lista "OPUESTA"))
+        (if col (setq res (append res (list col))))
+      )
+    )
+  )
+
+  res
+)
+
+(defun _imprimir-resumen-madera (lista / cols c)
+  (setq cols (_generar-colocaciones-madera lista))
+
+  (if cols
+    (progn
+      (prompt "\n\n--- MADERA FUERA DE DESPIECE ---")
+      (foreach c cols
+        (prompt
+          (strcat
+            "\nMuro " (itoa (_col-muro c))
+            " | Cara " (_col-cara c)
+            " | Madera: " (rtos (_longitud-uso-colocacion c) 2 2) " cm"
+            " | Posicion: " (_fmt-str (_col-extremo c)) " del pano"
+          )
+        )
+      )
+    )
+  )
 )
 ; =========================================================
 ; PIEZAS DE ESQUINA
@@ -6305,7 +6463,13 @@
   )
 )
 
-(defun _imprimir-tramos-rectos-por-muro (lista infos itemsRectos / muro id info longGeom caras longBase longOpuesta itemsMuro resumen)
+(defun _imprimir-tramos-rectos-por-muro
+  (lista infos itemsRectos /
+   muro id info longGeom caras
+   longBase longOpuesta
+   modularBase modularOpuesta
+   maderaBase maderaOpuesta
+   itemsMuro resumen)
   (prompt "\n===== TRAMOS RECTOS =====")
 
   (foreach muro lista
@@ -6316,6 +6480,14 @@
     (setq caras       (cdr (assoc "CARAS" info)))
     (setq longBase    (cdr (assoc "LONG_BASE" info)))
     (setq longOpuesta (cdr (assoc "LONG_OPUESTA" info)))
+    (setq modularBase (_longitud-modular-encofrado longBase))
+    (setq maderaBase  (_longitud-madera-encofrado longBase))
+    (setq modularOpuesta
+      (if longOpuesta (_longitud-modular-encofrado longOpuesta) nil)
+    )
+    (setq maderaOpuesta
+      (if longOpuesta (_longitud-madera-encofrado longOpuesta) nil)
+    )
 
     (setq itemsMuro (_filtrar-items-de-muro itemsRectos id))
     (setq resumen (_consolidar-items-por-id itemsMuro))
@@ -6329,7 +6501,16 @@
         " | ESP: " (rtos (nth 7 muro) 2 2)
         " | CARAS: " (itoa caras)
         " | BASE UTIL: " (rtos longBase 2 2)
+        " = SISTEMA " (rtos modularBase 2 2)
+        " + MADERA " (rtos maderaBase 2 2)
         " | PROLONG. UTIL: " (if longOpuesta (rtos longOpuesta 2 2) "-")
+        (if longOpuesta
+          (strcat
+            " = SISTEMA " (rtos modularOpuesta 2 2)
+            " + MADERA " (rtos maderaOpuesta 2 2)
+          )
+          ""
+        )
       )
     )
 
@@ -6426,6 +6607,7 @@
       (setq regsEsquinas (_generar-registros-esquinas lista))
       (_imprimir-tramos-rectos-por-muro lista infosRectos itemsRectos)
       (_imprimir-esquinas regsEsquinas)
+      (_imprimir-resumen-madera lista)
     )
   )
   (princ)
@@ -6439,18 +6621,31 @@
 
 
 
-(defun c:PROBAR_PANYO (/ long alt sol bandas b usosBanda pieza resumenBanda usosTotales resumenTotal)
+(defun c:PROBAR_PANYO (/ long longModular madera alt sol bandas b usosBanda pieza resumenBanda usosTotales resumenTotal)
 
   (setq long (getint "\nLongitud: "))
   (setq alt  (getint "\nAltura total: "))
 
   (if (and long alt)
     (progn
-      (setq sol (_resolver-panyo-reglas long alt))
+      (setq longModular (_longitud-modular-encofrado long))
+      (setq madera (_longitud-madera-encofrado long))
+      (setq sol
+        (if (> longModular 0.0)
+          (_resolver-panyo-reglas longModular alt)
+          nil
+        )
+      )
 
       (if sol
         (progn
-          (prompt (strcat "\nSOLUCION PARA " (itoa long) " x " (itoa alt)))
+          (prompt
+            (strcat
+              "\nSOLUCION PARA " (itoa long) " x " (itoa alt)
+              " | SISTEMA: " (rtos longModular 2 2)
+              " | MADERA FUERA DE DESPIECE: " (rtos madera 2 2)
+            )
+          )
 
           (setq bandas (_sol-panyo-bandas sol))
           (setq usosTotales '())
@@ -6548,6 +6743,76 @@
     )
     nil
   )
+)
+
+(defun _poner-color-entidad (ent color / datos)
+  (if (and ent (entget ent))
+    (progn
+      (setq datos (entget ent))
+      (if (assoc 62 datos)
+        (setq datos (subst (cons 62 color) (assoc 62 datos) datos))
+        (setq datos (append datos (list (cons 62 color))))
+      )
+      (entmod datos)
+      (entupd ent)
+    )
+  )
+  ent
+)
+
+(defun _dibujar-tramo-madera (c / p0 p1 corr n off q0 q1 perfil region sol)
+  ;; Prisma 3D que ocupa el mismo plano y espesor que una chapa.
+  ;; La madera no se convierte en pieza de catalogo.
+  (setq corr (_correccion-espesor-colocacion c))
+  (setq p0 (_vec-add (_col-p0 c) corr))
+  (setq p1 (_vec-add (_col-p1 c) corr))
+  (setq n (_normal-tramo-colocacion c))
+  ;; Los bloques parten del punto de insercion y desarrollan su espesor
+  ;; hacia la derecha de su eje local.
+  (setq off (_vec-scale n (- *def-espesor-chapa*)))
+  (setq q0 (_vec-add p0 off))
+  (setq q1 (_vec-add p1 off))
+
+  (setq perfil (_crear-lwpoly-cerrada-2d (list p0 p1 q1 q0)))
+  (setq region (_crear-region-desde-entidad perfil))
+
+  (if (and perfil (entget perfil))
+    (entdel perfil)
+  )
+
+  (setq sol
+    (if region
+      (_extruir-region region (_altura-uso-colocacion c))
+      nil
+    )
+  )
+
+  (if (and region (entget region))
+    (entdel region)
+  )
+
+  (if sol
+    (progn
+      (_mover-entidad-z sol (_col-z0 c))
+      (_poner-color-entidad sol 30)
+      T
+    )
+    nil
+  )
+)
+
+(defun _dibujar-colocaciones-madera (cols / c ok nok)
+  (setq ok 0)
+  (setq nok 0)
+
+  (foreach c cols
+    (if (_dibujar-tramo-madera c)
+      (setq ok (1+ ok))
+      (setq nok (1+ nok))
+    )
+  )
+
+  (list ok nok)
 )
 
 (defun _correccion-espesor-colocacion (c / cara n origen extremo muro ref)
@@ -6651,7 +6916,7 @@
 
 
 
-(defun c:INSERTAR_BLOQUES_RECTOS_PLANTA (/ lista cols c pt ang blk nok ok)
+(defun c:INSERTAR_BLOQUES_RECTOS_PLANTA (/ lista cols colsMadera c pt ang blk nok ok rMadera)
   (setq ok 0)
   (setq nok 0)
 
@@ -6660,6 +6925,7 @@
     (progn
       (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
       (setq cols (_generar-colocaciones-rectas lista))
+      (setq colsMadera (_generar-colocaciones-madera lista))
 
       (foreach c cols
         (setq blk (_col-bloque c))
@@ -6672,10 +6938,14 @@
         )
       )
 
+      (setq rMadera (_dibujar-colocaciones-madera colsMadera))
+
       (prompt
         (strcat
           "\nBloques insertados: " (itoa ok)
           " | Fallidos: " (itoa nok)
+          "\nTramos de madera dibujados: " (itoa (car rMadera))
+          " | Fallidos: " (itoa (cadr rMadera))
         )
       )
     )
@@ -9110,6 +9380,7 @@
       (setq itemsEsquinas (_items-de-registros-esquinas regsEsquinas))
       (setq itemsTotales  (append itemsRectos itemsEsquinas))
       (_imprimir-despiece-consolidado-global itemsTotales)
+      (_imprimir-resumen-madera lista)
     )
   )
   (princ)
@@ -9194,13 +9465,15 @@
     (setq caras (nth 8 muro))
     (setq id (_muro-id muro))
     (setq longBase (_longitud-util-cara-muro muro aj lista "BASE"))
-    (if (and (> longBase 0.0) (null (_hay-col-recta-muro-cara-p cols id "BASE")))
+    (if (and (> (_longitud-modular-encofrado longBase) 0.0)
+             (null (_hay-col-recta-muro-cara-p cols id "BASE")))
       (setq ok nil)
     )
     (if (= caras 2)
       (progn
         (setq longOpuesta (_longitud-util-cara-muro muro aj lista "OPUESTA"))
-        (if (and (> longOpuesta 0.0) (null (_hay-col-recta-muro-cara-p cols id "OPUESTA")))
+        (if (and (> (_longitud-modular-encofrado longOpuesta) 0.0)
+                 (null (_hay-col-recta-muro-cara-p cols id "OPUESTA")))
           (setq ok nil)
         )
       )
@@ -9228,13 +9501,15 @@
     (setq caras (nth 8 muro))
     (setq id (_muro-id muro))
     (setq longBase (_longitud-util-cara-muro muro aj lista "BASE"))
-    (if (and (> longBase 0.0) (null (_hay-item-recto-muro-cara-p items id "BASE")))
+    (if (and (> (_longitud-modular-encofrado longBase) 0.0)
+             (null (_hay-item-recto-muro-cara-p items id "BASE")))
       (setq ok nil)
     )
     (if (= caras 2)
       (progn
         (setq longOpuesta (_longitud-util-cara-muro muro aj lista "OPUESTA"))
-        (if (and (> longOpuesta 0.0) (null (_hay-item-recto-muro-cara-p items id "OPUESTA")))
+        (if (and (> (_longitud-modular-encofrado longOpuesta) 0.0)
+                 (null (_hay-item-recto-muro-cara-p items id "OPUESTA")))
           (setq ok nil)
         )
       )
@@ -9436,12 +9711,13 @@
       (prompt "\n\n--- TOTAL GENERAL DESPIECE + TORNILLERIA ---")
       (setq itemsTotales (append itemsPiezas itemsTorn))
       (_imprimir-resumen-consolidado (_consolidar-despiece itemsTotales))
+      (_imprimir-resumen-madera lista)
     )
   )
   (princ)
 )
 
-(defun c:GENERAR_MURO_COMPLETO (/ lista datos colsRectas colsComp colsEsq r1 r2 r3 ok nok)
+(defun c:GENERAR_MURO_COMPLETO (/ lista datos colsRectas colsComp colsEsq colsMadera r1 r2 r3 r4 ok nok)
   (setq ok 0)
   (setq nok 0)
   (if (null *MUROS*)
@@ -9454,6 +9730,7 @@
       (setq colsRectas (cdr (assoc "RECTAS" datos)))
       (setq colsComp   (cdr (assoc "COMP" datos)))
       (setq colsEsq    (cdr (assoc "ESQ" datos)))
+      (setq colsMadera (_generar-colocaciones-madera lista))
 
       (prompt "\n===== GENERANDO MURO COMPLETO =====")
       (prompt "\nCRITERIO STOCK: compensaciones con prioridad flexible.")
@@ -9472,6 +9749,11 @@
       (setq ok  (+ ok  (car r3)))
       (setq nok (+ nok (cadr r3)))
       (prompt (strcat "\nEsquinas insertadas: " (itoa (car r3)) " | Fallidas: " (itoa (cadr r3))))
+
+      (setq r4 (_dibujar-colocaciones-madera colsMadera))
+      (setq ok  (+ ok  (car r4)))
+      (setq nok (+ nok (cadr r4)))
+      (prompt (strcat "\nTramos de madera dibujados: " (itoa (car r4)) " | Fallidos: " (itoa (cadr r4))))
 
       (prompt (strcat "\nTOTAL insertados: " (itoa ok) " | Fallidos: " (itoa nok)))
     )
@@ -10196,7 +10478,7 @@
     nil
   )
 )
-(defun c:ACOTAR_PLANTA_BASE (/ lista datos colsRectas colsComp c muro dir ok nok)
+(defun c:ACOTAR_PLANTA_BASE (/ lista datos colsRectas colsComp colsMadera c muro dir ok nok)
   (setq ok 0)
   (setq nok 0)
 
@@ -10209,6 +10491,7 @@
       (setq datos (_generar-cols-stock-comp-preferente lista))
       (setq colsRectas (cdr (assoc "RECTAS" datos)))
       (setq colsComp (_generar-colocaciones-compensaciones lista))
+      (setq colsMadera (_generar-colocaciones-madera lista))
 
       ;; RECTOS: solo cara BASE
       (foreach c colsRectas
@@ -10241,6 +10524,21 @@
         )
       )
 
+      ;; MADERA: se acota como tramo independiente, pero no entra en despiece.
+      (foreach c colsMadera
+        (if (= (_col-cara c) "BASE")
+          (progn
+            (setq muro (_buscar-muro-por-id (_col-muro c) lista))
+            (setq dir (_normal-exterior-cara muro "BASE"))
+
+            (if (_acotar-alineada-hacia (_col-p0 c) (_col-p1 c) 50.0 dir)
+              (setq ok (1+ ok))
+              (setq nok (1+ nok))
+            )
+          )
+        )
+      )
+
       (vla-Regen
         (vla-get-ActiveDocument (vlax-get-acad-object))
         acAllViewports
@@ -10249,7 +10547,7 @@
       (prompt
         (strcat
           "\nAcotacion en planta generada SOLO por BASE."
-          "\nRectos + compensaciones/esquinas."
+          "\nRectos + madera + compensaciones/esquinas."
           "\nCotas creadas: " (itoa ok)
           " | Fallidas: " (itoa nok)
         )
@@ -11248,4 +11546,105 @@
   )
 
   total
+)
+
+; =========================================================
+; PATCH ACOTACION PLANTA BASE
+; Mantiene la acotacion original y elimina duplicados en planta.
+;
+; PENDIENTE:
+; La acotacion actual agrupa por muro/cara/S0/S1 y funciona cuando las
+; bandas en altura tienen el mismo despiece. Si varias bandas tienen
+; divisiones distintas, acotar todas en planta mezcla cotas incompatibles.
+;
+; Antes de ampliar esta parte hay que definir una estrategia grafica:
+; - Planta: acotar solamente una banda de referencia, probablemente Z0=0.
+; - Alzado: representar y acotar por separado cada banda diferente.
+; - Detectar bandas con el mismo patron para no repetir alzados/cotas.
+; - Evitar que AutoCAD desplace automaticamente textos de cotas pequenas
+;   a posiciones desordenadas cuando no caben entre las lineas auxiliares.
+; - Definir un criterio comun para textos exteriores, lideres y separacion
+;   minima, detectando colisiones entre cotas consecutivas.
+; - Tratar especialmente madera y piezas estrechas de 2 a 5 cm para que
+;   su texto sea legible sin romper la cadena general de acotacion.
+; No modificar el criterio actual hasta decidir el formato de planos.
+; =========================================================
+
+(defun _clave-cota-planta-base (c)
+  (strcat
+    (itoa (_col-muro c)) "|"
+    (_fmt-str (_col-cara c)) "|"
+    (rtos (_col-s0 c) 2 4) "|"
+    (rtos (_col-s1 c) 2 4) "|"
+    (_fmt-str (_col-extremo c))
+  )
+)
+
+(defun _cols-planta-base-unicas (cols / res claves c clave)
+  (setq res '())
+  (setq claves '())
+  (foreach c cols
+    (if (= (_col-cara c) "BASE")
+      (progn
+        (setq clave (_clave-cota-planta-base c))
+        (if (not (member clave claves))
+          (progn
+            (setq claves (cons clave claves))
+            (setq res (append res (list c)))
+          )
+        )
+      )
+    )
+  )
+  res
+)
+
+(defun c:ACOTAR_PLANTA_BASE
+  (/ lista datos colsRectas colsComp colsMadera c muro dir ok nok)
+  (setq ok 0)
+  (setq nok 0)
+
+  (if (null *MUROS*)
+    (prompt "\nNo hay muros cargados.")
+    (progn
+      (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+      (_stock-iniciar-calculo)
+      (setq datos (_generar-cols-stock-comp-preferente lista))
+
+      (setq colsRectas
+        (_cols-planta-base-unicas (cdr (assoc "RECTAS" datos)))
+      )
+      (setq colsComp
+        (_cols-planta-base-unicas (_generar-colocaciones-compensaciones lista))
+      )
+      (setq colsMadera
+        (_cols-planta-base-unicas (_generar-colocaciones-madera lista))
+      )
+
+      (foreach c (append colsRectas colsComp colsMadera)
+        (setq muro (_buscar-muro-por-id (_col-muro c) lista))
+        (setq dir (_normal-exterior-cara muro "BASE"))
+        (if (_acotar-alineada-hacia (_col-p0 c) (_col-p1 c) 50.0 dir)
+          (setq ok (1+ ok))
+          (setq nok (1+ nok))
+        )
+      )
+
+      (vla-Regen
+        (vla-get-ActiveDocument (vlax-get-acad-object))
+        acAllViewports
+      )
+
+      (prompt
+        (strcat
+          "\nAcotacion en planta generada SOLO por BASE."
+          "\nRectos + madera + compensaciones/esquinas."
+          "\nCotas duplicadas por bandas de altura eliminadas."
+          "\nCotas creadas: " (itoa ok)
+          " | Fallidas: " (itoa nok)
+        )
+      )
+    )
+  )
+  (princ)
 )
