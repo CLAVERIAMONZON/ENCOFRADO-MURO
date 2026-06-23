@@ -9800,7 +9800,7 @@
   (strcat (rtos v 2 2) " &euro;")
 )
 
-(defun _presu-write-css (f)
+(defun _presu-write-css (f imprimirFondo)
   (write-line "<style>" f)
   (write-line
     ":root {
@@ -9823,34 +9823,47 @@
   )
 
   (write-line
+    ".hoja-presupuesto {
+      width: 210mm;
+      height: 297mm;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      page-break-after: always;
+    }"
+    f
+  )
+
+  (write-line ".hoja-presupuesto:last-child { page-break-after: auto; }" f)
+
+  (write-line
     ".page {
       width: 190mm;
       height: 230mm;
       margin: 60mm auto 0 auto;
       position: relative;
       z-index: 0;
-      page-break-after: always;
     }"
     f
   )
-
-  (write-line ".page:last-child { page-break-after: auto; }" f)
-  (write-line
-  ".page::before {
-      content: '';
-      position: absolute;
-      left: -10mm;
-      top: -40mm;
-      width: 210mm;
-      height: 297mm;
-      background-image:url('fondo.jpg');
-      background-size:210mm 297mm;
-      background-repeat:no-repeat;
-      background-position:top center;
-      z-index:-1;
-    }"
-  f
-)
+  (if imprimirFondo
+    (write-line
+    ".page::before {
+        content: '';
+        position: absolute;
+        left: -10mm;
+        top: -40mm;
+        width: 210mm;
+        height: 297mm;
+        background-image:url('fondo.jpg');
+        background-size:210mm 297mm;
+        background-repeat:no-repeat;
+        background-position:top center;
+        z-index:-1;
+      }"
+    f
+  )
+  )
 
   (write-line
     ".caja-presupuesto {
@@ -10071,7 +10084,16 @@
   (write-line ".label { font-weight: normal; text-align: left; background: #fff; }" f)
   (write-line ".total-final td { background: #444; color: #fff; font-size: 10px; font-weight: bold; padding: 4px 5px; }" f)
 
-  (write-line "@media print { body { margin: 0; } }" f)
+  (write-line
+    "@media print {
+      body { margin: 0; }
+      body.presupuesto-sin-fondo .hoja-presupuesto {
+        transform: translate(5mm, 2mm) rotate(180deg);
+        transform-origin: 105mm 148.5mm;
+      }
+    }"
+    f
+  )
   (write-line "</style>" f)
 )
 (defun _presu-write-linea-item (f reg dias / id cant pieza desc precio impTotal)
@@ -10234,6 +10256,7 @@
 )
 
 (defun _presu-write-cabecera-pagina (f cliente obra fecha)
+  (write-line "<div class='hoja-presupuesto'>" f)
   (write-line "<div class='page'>" f)
 
   (write-line "<div class='datos-superiores'>" f)
@@ -10301,7 +10324,7 @@
 )
 
 (defun _write-presupuesto-html-a4-final
-       (path cliente obra dias transporte ventasPVC alquilerExtra resumenTotal
+       (path cliente obra dias transporte ventasPVC alquilerExtra resumenTotal imprimirFondo
         / f fecha lineasFinales paginas numPag idx pagina ultima subtotal alquilerBase seguroRC)
 
   (setq f (open path "w"))
@@ -10350,9 +10373,12 @@
       (write-line "<head>" f)
       (write-line "<meta charset='utf-8'>" f)
       (write-line "<title>Presupuesto alquiler encofrado</title>" f)
-      (_presu-write-css f)
+      (_presu-write-css f imprimirFondo)
       (write-line "</head>" f)
-      (write-line "<body>" f)
+      (if imprimirFondo
+        (write-line "<body>" f)
+        (write-line "<body class='presupuesto-sin-fondo'>" f)
+      )
 
       (foreach pagina paginas
         (setq idx (1+ idx))
@@ -10372,6 +10398,7 @@
 	)
 
 	(write-line "</div>" f)
+	(write-line "</div>" f)
       )
 
       (write-line "</body>" f)
@@ -10382,7 +10409,7 @@
     )
   )
 )
-(defun c:GENERAR_PRESUPUESTO (/ lista cliente obra dias transporte ventasPVC alquilerExtra path resumenTotal ok)
+(defun c:GENERAR_PRESUPUESTO (/ lista cliente obra dias transporte ventasPVC alquilerExtra path resumenTotal ok resp imprimirFondo)
   (if (null *MUROS*)
     (prompt "\nNo hay muros cargados.")
     (progn
@@ -10413,6 +10440,10 @@
       ;; venta PVC
       (setq ventasPVC (_pedir-pvc-venta))
 
+      (initget "SI NO")
+      (setq resp (getkword "\nImprimir fondo? [SI/NO] <SI>: "))
+      (setq imprimirFondo (/= resp "NO"))
+
       (setq path (getfiled "Guardar presupuesto HTML" "presupuesto_encofrado.html" "html" 1))
 
       (if (null path)
@@ -10430,6 +10461,7 @@
               ventasPVC
               alquilerExtra
               resumenTotal
+              imprimirFondo
             )
           )
 
