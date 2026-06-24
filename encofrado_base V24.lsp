@@ -10083,6 +10083,10 @@
 )	  
   (write-line ".label { font-weight: normal; text-align: left; background: #fff; }" f)
   (write-line ".total-final td { background: #444; color: #fff; font-size: 10px; font-weight: bold; padding: 4px 5px; }" f)
+  (write-line ".hoja-dibujo { width: 210mm; height: 297mm; page-break-before: always; }" f)
+  (write-line ".page-dibujo { width: 190mm; height: 230mm; margin: 55mm auto 0 auto; position: relative; z-index: 0; }" f)
+  (write-line ".vista-dibujo { width: 100%; height: 185mm; border: var(--borde-presu); margin-top: 3mm; padding: 0; text-align: center; background: #fff; overflow: hidden; display: flex; align-items: center; justify-content: center; }" f)
+  (write-line ".vista-dibujo img { width: 100%; height: 100%; object-fit: contain; transform: scale(1.35); transform-origin: center center; filter: invert(1) grayscale(1) contrast(1.25); }" f)
 
   (write-line
     "@media print {
@@ -10272,6 +10276,202 @@
   (_write-stock-html-presu f)
   (write-line "<div class='caja-presupuesto'></div>" f)
 )
+
+(defun _presu-path-url (path / s i ch)
+  (setq s "")
+  (setq i 1)
+  (while (<= i (strlen path))
+    (setq ch (substr path i 1))
+    (setq s
+      (strcat s
+        (cond
+          ((= ch "\\") "/")
+          ((= ch " ") "%20")
+          (T ch)
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+  s
+)
+
+(defun _presu-ruta-vista-desde-presupuesto (path / dir base)
+  (setq dir (vl-filename-directory path))
+  (setq base (vl-filename-base path))
+  (strcat dir "\\" base "_vista.jpg")
+)
+
+(defun _presu-color-fondo-modelo (/ prefs display colors color)
+  (setq color nil)
+  (vl-catch-all-apply
+    '(lambda ()
+      (setq prefs (vlax-get-property (vlax-get-acad-object) 'Preferences))
+      (setq display (vlax-get-property prefs 'Display))
+      (setq color (vlax-get-property display 'GraphicsWinModelBackgrndColor))
+    )
+  )
+  color
+)
+
+(defun _presu-set-color-fondo-modelo (color / prefs display)
+  (vl-catch-all-apply
+    '(lambda ()
+      (setq prefs (vlax-get-property (vlax-get-acad-object) 'Preferences))
+      (setq display (vlax-get-property prefs 'Display))
+      (vlax-put-property display 'GraphicsWinModelBackgrndColor color)
+      (vla-Regen (vla-get-ActiveDocument (vlax-get-acad-object)) acAllViewports)
+    )
+  )
+)
+
+(defun _presu-capturar-vista-jpgout (pathImg / oldFiledia oldCmddia oldBg ss err)
+  (setq oldFiledia (getvar "FILEDIA"))
+  (setq oldCmddia (getvar "CMDDIA"))
+  (setq oldBg (_presu-color-fondo-modelo))
+
+  (if (findfile pathImg)
+    (vl-file-delete pathImg)
+  )
+
+  (setvar "FILEDIA" 0)
+  (setvar "CMDDIA" 0)
+  (_presu-set-color-fondo-modelo 16777215)
+
+  (setq ss (ssget "_X"))
+
+  (setq err
+    (vl-catch-all-apply
+      '(lambda ()
+        (if ss
+          (command "_.JPGOUT" pathImg ss "")
+        )
+      )
+    )
+  )
+
+  (while (> (getvar "CMDACTIVE") 0)
+    (command)
+  )
+
+  (setvar "FILEDIA" oldFiledia)
+  (setvar "CMDDIA" oldCmddia)
+  (if oldBg
+    (_presu-set-color-fondo-modelo oldBg)
+  )
+
+  (if (and (not (vl-catch-all-error-p err)) (findfile pathImg))
+    (progn
+      (prompt (strcat "\nImagen de vista creada con JPGOUT: " pathImg))
+      pathImg
+    )
+    nil
+  )
+)
+
+(defun _presu-capturar-vista-plot (pathImg / oldFiledia oldCmddia oldBack err)
+  (setq oldFiledia (getvar "FILEDIA"))
+  (setq oldCmddia (getvar "CMDDIA"))
+  (setq oldBack (getvar "BACKGROUNDPLOT"))
+
+  (if (findfile pathImg)
+    (vl-file-delete pathImg)
+  )
+
+  (setvar "FILEDIA" 0)
+  (setvar "CMDDIA" 0)
+  (setvar "BACKGROUNDPLOT" 0)
+
+  (setq err
+    (vl-catch-all-apply
+      '(lambda ()
+        (command
+          "_.-PLOT"
+          "_Yes"
+          ""
+          "PublishToWeb JPG.pc3"
+          ""
+          ""
+          "_No"
+          "_Display"
+          "_Fit"
+          "_Center"
+          "_Yes"
+          "monochrome.ctb"
+          "_Yes"
+          "_As displayed"
+          pathImg
+          "_No"
+          "_Yes"
+        )
+      )
+    )
+  )
+
+  (setvar "FILEDIA" oldFiledia)
+  (setvar "CMDDIA" oldCmddia)
+  (setvar "BACKGROUNDPLOT" oldBack)
+
+  (while (> (getvar "CMDACTIVE") 0)
+    (command)
+  )
+
+  (if (and (not (vl-catch-all-error-p err)) (findfile pathImg))
+    (progn
+      (prompt (strcat "\nImagen de vista creada: " pathImg))
+      pathImg
+    )
+    (progn
+      (if (vl-catch-all-error-p err)
+        (prompt (strcat "\nError AutoCAD al capturar vista: " (vl-catch-all-error-message err)))
+      )
+      nil
+    )
+  )
+)
+
+(defun _presu-capturar-vista-actual (pathImg / img)
+  (setq img (_presu-capturar-vista-jpgout pathImg))
+
+  (if (null img)
+    (progn
+      (prompt "\nJPGOUT no pudo crear la imagen. Probando captura por trazado...")
+      (setq img (_presu-capturar-vista-plot pathImg))
+    )
+  )
+
+  img
+)
+
+(defun _presu-write-hoja-dibujo (f cliente obra fecha imagenVista)
+  (write-line "<div class='hoja-presupuesto hoja-dibujo'>" f)
+  (write-line "<div class='page page-dibujo'>" f)
+
+  (write-line "<div class='datos-superiores'>" f)
+  (write-line (strcat "<p><strong>Cliente:</strong> " (_html-escape (strcase cliente)) "</p>") f)
+  (write-line (strcat "<p><strong>Obra:</strong> " (_html-escape (strcase obra)) "</p>") f)
+  (write-line (strcat "<p><strong>Fecha:</strong> " (_html-escape fecha) "</p>") f)
+  (write-line "</div>" f)
+
+  (write-line "<div class='header'>" f)
+  (write-line "<h1>VISTA DEL DIBUJO DEL ENCOFRADO</h1>" f)
+  (write-line "</div>" f)
+
+  (write-line "<div class='vista-dibujo'>" f)
+  (write-line
+    (strcat
+      "<img src='file:///"
+      (_html-escape (_presu-path-url imagenVista))
+      "' alt='Vista del dibujo del encofrado'>"
+    )
+    f
+  )
+  (write-line "</div>" f)
+
+  (write-line "</div>" f)
+  (write-line "</div>" f)
+)
+
 (defun _generar-datos-presupuesto-final (lista / datos itemsRectos regsEsquinas itemsEsquinas itemsPiezas itemsTorn itemsTotales)
   (_stock-iniciar-calculo)
   (setq datos         (_generar-despiece-stock-comp-preferente lista))
@@ -10324,7 +10524,7 @@
 )
 
 (defun _write-presupuesto-html-a4-final
-       (path cliente obra dias transporte ventasPVC alquilerExtra resumenTotal imprimirFondo
+       (path cliente obra dias transporte ventasPVC alquilerExtra resumenTotal imprimirFondo imagenVista
         / f fecha lineasFinales paginas numPag idx pagina ultima subtotal alquilerBase seguroRC)
 
   (setq f (open path "w"))
@@ -10401,6 +10601,10 @@
 	(write-line "</div>" f)
       )
 
+      (if (and imagenVista (/= imagenVista ""))
+        (_presu-write-hoja-dibujo f cliente obra fecha imagenVista)
+      )
+
       (write-line "</body>" f)
       (write-line "</html>" f)
 
@@ -10409,7 +10613,7 @@
     )
   )
 )
-(defun c:GENERAR_PRESUPUESTO (/ lista cliente obra dias transporte ventasPVC alquilerExtra path resumenTotal ok resp imprimirFondo)
+(defun c:GENERAR_PRESUPUESTO (/ lista cliente obra dias transporte ventasPVC alquilerExtra path resumenTotal ok resp imprimirFondo incluirVista imagenVista pathVista)
   (if (null *MUROS*)
     (prompt "\nNo hay muros cargados.")
     (progn
@@ -10444,11 +10648,32 @@
       (setq resp (getkword "\nImprimir fondo? [SI/NO] <SI>: "))
       (setq imprimirFondo (/= resp "NO"))
 
+      (initget "SI NO")
+      (setq resp (getkword "\nIncluir vista del dibujo en hoja aparte? [SI/NO] <NO>: "))
+      (setq incluirVista (= resp "SI"))
+
       (setq path (getfiled "Guardar presupuesto HTML" "presupuesto_encofrado.html" "html" 1))
 
       (if (null path)
         (prompt "\nCancelado. No se genero presupuesto.")
         (progn
+          (setq imagenVista nil)
+
+          (if incluirVista
+            (progn
+              (setq pathVista (_presu-ruta-vista-desde-presupuesto path))
+              (prompt (strcat "\nCapturando vista actual de AutoCAD: " pathVista))
+              (setq imagenVista (_presu-capturar-vista-actual pathVista))
+
+              (if (null imagenVista)
+                (progn
+                  (prompt "\nNo se pudo capturar automaticamente la vista actual con PublishToWeb JPG.pc3.")
+                  (prompt (strcat "\nNo se genero la imagen: " pathVista))
+                )
+              )
+            )
+          )
+
           (setq resumenTotal (_generar-datos-presupuesto-final lista))
 
           (setq ok
@@ -10462,6 +10687,7 @@
               alquilerExtra
               resumenTotal
               imprimirFondo
+              imagenVista
             )
           )
 
@@ -10766,6 +10992,11 @@
   (_ayuda-cmd
     "ACOTAR_PLANTA_BASE"
     "Acota rectos y esquinas solo por la cara BASE."
+  )
+
+  (_ayuda-cmd
+    "LIMPIAR_ACOTACION_PLANTA_BASE"
+    "Borra las cotas generadas por ACOTAR_PLANTA_BASE."
   )
 
   (prompt "\n\n========================================")
@@ -11631,14 +11862,192 @@
   res
 )
 
+(defun _capa-acotacion-planta-base ()
+  "COTAS_PLANTA_BASE"
+)
+
+(defun _asegurar-capa-simple (nombre / ent datos)
+  (if (not (tblsearch "LAYER" nombre))
+    (entmakex
+      (list
+        (cons 0 "LAYER")
+        (cons 100 "AcDbSymbolTableRecord")
+        (cons 100 "AcDbLayerTableRecord")
+        (cons 2 nombre)
+        (cons 70 0)
+        (cons 62 7)
+        (cons 6 "Continuous")
+      )
+    )
+    (progn
+      (setq ent (tblobjname "LAYER" nombre))
+      (setq datos (entget ent))
+      (if (assoc 62 datos)
+        (setq datos (subst (cons 62 7) (assoc 62 datos) datos))
+        (setq datos (append datos (list (cons 62 7))))
+      )
+      (entmod datos)
+      (entupd ent)
+    )
+  )
+  nombre
+)
+
+(defun c:LIMPIAR_ACOTACION_PLANTA_BASE (/ capa ss i ent borradas)
+  (setq capa (_capa-acotacion-planta-base))
+  (setq borradas 0)
+
+  (setq ss (ssget "_X" (list (cons 0 "DIMENSION") (cons 8 capa))))
+
+  (if ss
+    (progn
+      (setq i 0)
+      (while (< i (sslength ss))
+        (setq ent (ssname ss i))
+        (if ent
+          (progn
+            (entdel ent)
+            (setq borradas (1+ borradas))
+          )
+        )
+        (setq i (1+ i))
+      )
+    )
+  )
+
+  (prompt
+    (strcat
+      "\nCotas de ACOTAR_PLANTA_BASE eliminadas: "
+      (itoa borradas)
+    )
+  )
+  (princ)
+)
+
+(defun _rango-altura-en-lista-p (r lst / ok item)
+  (setq ok nil)
+  (foreach item lst
+    (if (and (equal (car r) (car item) 1e-8)
+             (equal (cadr r) (cadr item) 1e-8))
+      (setq ok T)
+    )
+  )
+  ok
+)
+
+(defun _rangos-altura-cols-muro-base (cols muro / res c r)
+  (setq res '())
+  (foreach c cols
+    (if (and (= (_col-muro c) (_muro-id muro))
+             (= (_col-cara c) "BASE")
+             (_col-z0 c)
+             (_col-z1 c)
+             (> (- (_col-z1 c) (_col-z0 c)) 0.0))
+      (progn
+        (setq r (list (_col-z0 c) (_col-z1 c)))
+        (if (not (_rango-altura-en-lista-p r res))
+          (setq res (append res (list r)))
+        )
+      )
+    )
+  )
+  (vl-sort
+    res
+    '(lambda (a b)
+      (if (equal (car a) (car b) 1e-8)
+        (< (cadr a) (cadr b))
+        (< (car a) (car b))
+      )
+    )
+  )
+)
+
+(defun _acotar-altura-muro-extremo-rango
+  (muro z0 z1 offset / p h p0 p1 p0u p1u pmu ptDim oldCmdecho err)
+  (setq p  (nth 3 muro))
+  (setq h (abs (- z1 z0)))
+
+  (if (and p h (> h 0.0))
+    (progn
+      (setq p0 (list (car p) (cadr p) z0))
+      (setq p1 (list (car p) (cadr p) z1))
+
+      (setq oldCmdecho (getvar "CMDECHO"))
+      (setvar "CMDECHO" 0)
+
+      (setq err
+        (vl-catch-all-apply
+          '(lambda ()
+            (command "_.UCS" "_X" "90")
+
+            (setq p0u (trans p0 0 1))
+            (setq p1u (trans p1 0 1))
+            (setq p0u (list (car p0u) (cadr p0u) 0.0))
+            (setq p1u (list (car p1u) (cadr p1u) 0.0))
+            (setq pmu (_pmid p0u p1u))
+            (setq ptDim
+              (list
+                (- (car pmu) (abs offset))
+                (cadr pmu)
+                0.0
+              )
+            )
+
+            (command "_.DIMALIGNED" p0u p1u ptDim)
+          )
+        )
+      )
+
+      (while (> (getvar "CMDACTIVE") 0)
+        (command)
+      )
+
+      (command "_.UCS" "_Previous")
+      (setvar "CMDECHO" oldCmdecho)
+
+      (if (not (vl-catch-all-error-p err))
+        T
+        nil
+      )
+    )
+    nil
+  )
+)
+
+(defun _acotar-altura-muro-extremo
+  (muro offset dirRef / z0 z1 h)
+  (setq z0 (nth 10 muro))
+  (setq z1 (nth 12 muro))
+
+  (if (and z0 z1 (/= z0 z1))
+    (_acotar-altura-muro-extremo-rango muro z0 z1 offset)
+    (progn
+      (setq h (_altura-real-muro muro))
+      (if (and h (> h 0.0))
+        (_acotar-altura-muro-extremo-rango muro 0.0 h offset)
+        nil
+      )
+    )
+  )
+)
+
 (defun c:ACOTAR_PLANTA_BASE
-  (/ lista datos colsRectas colsComp colsMadera c muro dir ok nok)
+  (/ lista datos colsRectas colsComp colsMadera c muro dir ok nok okTot okAlt offsetPiezas offsetTotal capaCotas oldLayer rangosAlt r)
   (setq ok 0)
   (setq nok 0)
+  (setq okTot 0)
+  (setq okAlt 0)
+  (setq offsetPiezas 50.0)
+  (setq offsetTotal 90.0)
+  (setq capaCotas (_capa-acotacion-planta-base))
 
   (if (null *MUROS*)
     (prompt "\nNo hay muros cargados.")
     (progn
+      (_asegurar-capa-simple capaCotas)
+      (setq oldLayer (getvar "CLAYER"))
+      (setvar "CLAYER" capaCotas)
+
       (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
       (_stock-iniciar-calculo)
       (setq datos (_generar-cols-stock-comp-preferente lista))
@@ -11656,9 +12065,50 @@
       (foreach c (append colsRectas colsComp colsMadera)
         (setq muro (_buscar-muro-por-id (_col-muro c) lista))
         (setq dir (_normal-exterior-cara muro "BASE"))
-        (if (_acotar-alineada-hacia (_col-p0 c) (_col-p1 c) 50.0 dir)
+        (if (_acotar-alineada-hacia (_col-p0 c) (_col-p1 c) offsetPiezas dir)
           (setq ok (1+ ok))
           (setq nok (1+ nok))
+        )
+      )
+
+      ;; Largo total de cada tramo, por el mismo lado y mas separado.
+      (foreach muro lista
+        (setq dir (_normal-exterior-cara muro "BASE"))
+        (if (_acotar-alineada-hacia (nth 3 muro) (nth 4 muro) offsetTotal dir)
+          (progn
+            (setq ok (1+ ok))
+            (setq okTot (1+ okTot))
+          )
+          (setq nok (1+ nok))
+        )
+      )
+
+      ;; Altura solo en el extremo inicial del muro 1.
+      (foreach muro lista
+        (if (= (nth 0 muro) 1)
+          (progn
+            (setq dir (_normal-exterior-cara muro "BASE"))
+            (setq rangosAlt (_rangos-altura-cols-muro-base colsRectas muro))
+
+            (if (> (length rangosAlt) 1)
+              (foreach r rangosAlt
+                (if (_acotar-altura-muro-extremo-rango muro (car r) (cadr r) offsetTotal)
+                  (progn
+                    (setq ok (1+ ok))
+                    (setq okAlt (1+ okAlt))
+                  )
+                  (setq nok (1+ nok))
+                )
+              )
+              (if (_acotar-altura-muro-extremo muro offsetTotal dir)
+                (progn
+                  (setq ok (1+ ok))
+                  (setq okAlt (1+ okAlt))
+                )
+                (setq nok (1+ nok))
+              )
+            )
+          )
         )
       )
 
@@ -11667,11 +12117,17 @@
         acAllViewports
       )
 
+      (if oldLayer
+        (setvar "CLAYER" oldLayer)
+      )
+
       (prompt
         (strcat
           "\nAcotacion en planta generada SOLO por BASE."
           "\nRectos + madera + compensaciones/esquinas."
           "\nCotas duplicadas por bandas de altura eliminadas."
+          "\nLargos totales de muro: " (itoa okTot)
+          " | Alturas en extremo: " (itoa okAlt)
           "\nCotas creadas: " (itoa ok)
           " | Fallidas: " (itoa nok)
         )
