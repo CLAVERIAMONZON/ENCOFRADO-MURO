@@ -31,6 +31,7 @@
 (setq *def-zsup2* 300.0)
 (setq *def-caras* 2)
 (setq *def-ref* "IZQUIERDA")(setq *def-espesor-chapa* 10.0)
+(setq *def-ala-angulo-interior* 20.0)
 
 ; =========================================================
 ; CATALOGO DE PIEZAS DE ENCOFRADO
@@ -735,6 +736,7 @@
 (defun _col-bloque    (c) (cdr (assoc "BLOQUE" c)))
 (defun _col-extremo   (c) (cdr (assoc "EXTREMO" c)))
 (defun _col-origen    (c) (cdr (assoc "ORIGEN" c)))
+(defun _col-oblicua   (c) (cdr (assoc "OBLICUA" c)))
 (defun _col-origen-banda (c)
   (cdr (assoc "ORIGEN_BANDA" c))
 )
@@ -1384,10 +1386,14 @@
           (strcat
             "\nMURO: " (itoa (_col-muro c))
             " | CARA: " (_col-cara c)
+            " | EXTREMO: " (_fmt-str (_col-extremo c))
+            " | OBLICUA: " (_fmt-str (_col-oblicua c))
             " | BANDA: " (itoa (_col-banda c))
             " | PIEZA: " (_cat-id pieza) " - " (_cat-codigo pieza)
             " | S0: " (rtos (_col-s0 c) 2 2)
             " | S1: " (rtos (_col-s1 c) 2 2)
+            " | Z0: " (rtos (_col-z0 c) 2 2)
+            " | Z1: " (rtos (_col-z1 c) 2 2)
             " | P0: " (_fmt-pt2d (_col-p0 c))
             " | P1: " (_fmt-pt2d (_col-p1 c))
             " | ANG(grados): " (_fmt-ang-grados (_col-ang c))
@@ -1532,8 +1538,26 @@
   (setq u (_vec-unit (_vec-sub p1 p0)))
   (_vec-add p0 (_vec-scale u dist))
 )
+(defun _res-tiene-ajuste-oblicuo-p (res lista / ini fin)
+  (setq ini (cdr (assoc "INICIO" res)))
+  (setq fin (cdr (assoc "FINAL"  res)))
+  (or
+    (_ajuste-oblicuo-p ini lista)
+    (_ajuste-oblicuo-p fin lista)
+  )
+)
+
 (defun _linea-cara-ajustada (muro res lista cara / d a b descIni descFin u)
-  (setq d (cdr (assoc "GEOM" res)))
+  ;; En esquinas oblicuas la compensacion se genera aparte.
+  ;; El tramo recto debe medirse desde la linea original del muro, no desde
+  ;; la prolongacion/interseccion de caras, porque eso mete la compensacion
+  ;; dentro del pano recto.
+  (setq d
+    (if (_res-tiene-ajuste-oblicuo-p res lista)
+      (_muro-offset-linea muro)
+      (cdr (assoc "GEOM" res))
+    )
+  )
 
   (if d
     (progn
@@ -1559,6 +1583,171 @@
       (list a b)
     )
     nil
+  )
+)
+
+(defun _linea-cara-sin-ajustar (muro cara / d)
+  (setq d (_muro-offset-linea muro))
+
+  (if d
+    (cond
+      ((= cara "BASE")    (list (nth 0 d) (nth 1 d)))
+      ((= cara "OPUESTA") (list (nth 2 d) (nth 3 d)))
+      (T nil)
+    )
+    nil
+  )
+)
+
+(defun _ajuste-oblicuo-p (aj lista / idOtro muroOtro cruce espOtro)
+  (if aj
+    (progn
+      (setq idOtro (_ajuste-extremo-muro-id aj))
+      (setq muroOtro (_buscar-muro-por-id idOtro lista))
+      (setq cruce (_ajuste-extremo-cruce-otro aj))
+      (setq espOtro (if muroOtro (nth 7 muroOtro) nil))
+      (and cruce espOtro (not (equal cruce espOtro 1e-6)))
+    )
+    nil
+  )
+)
+
+(defun _linea-referencia-compensacion (muro res lista caraComp aj)
+  (if (_ajuste-oblicuo-p aj lista)
+    (_linea-cara-sin-ajustar muro caraComp)
+    (_linea-cara-ajustada muro res lista caraComp)
+  )
+)
+
+(defun _proyectar-punto-en-linea-2d (p a b / ab ap den k)
+  (setq ab (_vec-sub b a))
+  (setq ap (_vec-sub p a))
+  (setq den (_2d-dot ab ab))
+
+  (if (> den 1e-8)
+    (progn
+      (setq k (/ (_2d-dot ap ab) den))
+      (_vec-add a (_vec-scale ab k))
+    )
+    a
+  )
+)
+
+(defun _esquina-por-muro-extremo-cualquiera (lista muroId extremo / res item)
+  (setq res nil)
+  (foreach item (_recolectar-esquinas-unicas lista)
+    (if (or
+          (and (= (cdr (assoc "MURO1" item)) muroId)
+               (= (cdr (assoc "EXT1" item)) extremo))
+          (and (= (cdr (assoc "MURO2" item)) muroId)
+               (= (cdr (assoc "EXT2" item)) extremo))
+        )
+      (setq res item)
+    )
+  )
+  res
+)
+
+(defun _ajuste-de-muro-extremo (muro lista extremo / res)
+  (setq res (_ajustar-muro-por-extremos-v2 muro lista))
+  (if res
+    (cdr (assoc extremo res))
+    nil
+  )
+)
+
+(defun _vertice-exterior-compensacion-oblicua (e lista / m1 m2 ext1 ext2 aj1 aj2 cara1 cara2 l1 l2)
+  (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+  (setq m2 (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+  (setq ext1 (cdr (assoc "EXT1" e)))
+  (setq ext2 (cdr (assoc "EXT2" e)))
+
+  (if (and m1 m2 ext1 ext2)
+    (progn
+      (setq aj1 (_ajuste-de-muro-extremo m1 lista ext1))
+      (setq aj2 (_ajuste-de-muro-extremo m2 lista ext2))
+      (setq cara1 (if aj1 (_cara-compensacion-en-extremo m1 aj1) nil))
+      (setq cara2 (if aj2 (_cara-compensacion-en-extremo m2 aj2) nil))
+      (setq l1 (if cara1 (_linea-cara-sin-ajustar m1 cara1) nil))
+      (setq l2 (if cara2 (_linea-cara-sin-ajustar m2 cara2) nil))
+
+      (if (and l1 l2)
+        (_line-intersection-2d (nth 0 l1) (nth 1 l1) (nth 0 l2) (nth 1 l2))
+        nil
+      )
+    )
+    nil
+  )
+)
+
+(defun _datos-arranque-compensacion-oblicua (muro lista extremo caraComp aj / e vExt vInt linea arrBase ang angLinea vecObj dotLinea dotOpuesto)
+  (setq e (_esquina-por-muro-extremo-cualquiera lista (_muro-id muro) extremo))
+
+  (if (null e)
+    nil
+    (progn
+      (setq vExt (_vertice-exterior-compensacion-oblicua e lista))
+      (setq vInt (_punto-interior-esquina muro lista extremo e))
+      (setq linea (_linea-cara-sin-ajustar muro caraComp))
+
+      (if (and vExt linea)
+        (progn
+          (setq arrBase (_datos-arranque-compensacion linea extremo))
+          (setq angLinea (angle (nth 0 linea) (nth 1 linea)))
+          (setq ang
+            (if vInt
+              (progn
+                (setq vecObj (_vec-sub vInt vExt))
+                (setq dotLinea
+                  (_2d-dot
+                    (list (cos angLinea) (sin angLinea) 0.0)
+                    vecObj
+                  )
+                )
+                (setq dotOpuesto
+                  (_2d-dot
+                    (list (cos (+ angLinea pi)) (sin (+ angLinea pi)) 0.0)
+                    vecObj
+                  )
+                )
+                (if (>= dotLinea dotOpuesto)
+                  angLinea
+                  (_norm-ang (+ angLinea pi))
+                )
+              )
+              (cdr (assoc "ANG" arrBase))
+            )
+          )
+          (list
+            (cons "PT" vExt)
+            (cons "ANG" ang)
+          )
+        )
+        nil
+      )
+    )
+  )
+)
+
+(defun _arranque-valido-p (arr)
+  (and
+    (listp arr)
+    (assoc "PT" arr)
+    (assoc "ANG" arr)
+  )
+)
+
+(defun _datos-arranque-compensacion-segun-ajuste (muro lista extremo caraComp aj linea / arr)
+  (setq arr
+    (if (_ajuste-oblicuo-p aj lista)
+      (_datos-arranque-compensacion-oblicua muro lista extremo caraComp aj)
+      nil
+    )
+  )
+
+  (if (_arranque-valido-p arr)
+    arr
+    (_datos-arranque-compensacion linea extremo)
   )
 )
 (defun _normal-exterior-cara (muro cara / p1 p2 n ref)
@@ -1674,6 +1863,96 @@
 
 (defun _2d-cross (a b)
   (- (* (car a) (cadr b)) (* (cadr a) (car b)))
+)
+
+(defun _2d-dot (a b)
+  (+ (* (car a) (car b)) (* (cadr a) (cadr b)))
+)
+
+(defun _clamp (x minv maxv)
+  (cond
+    ((< x minv) minv)
+    ((> x maxv) maxv)
+    (T x)
+  )
+)
+
+(defun _angulo-entre-vectores-2d (v1 v2 / u1 u2 d c)
+  (setq u1 (_vec-unit v1))
+  (setq u2 (_vec-unit v2))
+  (setq d (_clamp (_2d-dot u1 u2) -1.0 1.0))
+  (setq c (abs (_2d-cross u1 u2)))
+  (atan c d)
+)
+
+(defun _seno-angulo-entre-muros (m1 m2 / v1 v2 s)
+  (setq v1 (_vec-unit (_vector-muro m1)))
+  (setq v2 (_vec-unit (_vector-muro m2)))
+  (setq s (abs (_2d-cross v1 v2)))
+  (if (< s 1e-8) nil s)
+)
+
+(defun _angulo-esquina-desde-extremos (m1 ext1 m2 ext2)
+  (_angulo-entre-vectores-2d
+    (_dir-extremo-muro m1 ext1)
+    (_dir-extremo-muro m2 ext2)
+  )
+)
+
+(defun _extremos-conexion-entre (m1 m2 / tipo)
+  (setq tipo (_tipo-conexion m1 m2))
+  (cond
+    ((= tipo "FIN-INICIO")    (list "FINAL"  "INICIO"))
+    ((= tipo "INICIO-FIN")    (list "INICIO" "FINAL"))
+    ((= tipo "INICIO-INICIO") (list "INICIO" "INICIO"))
+    ((= tipo "FIN-FIN")       (list "FINAL"  "FINAL"))
+    (T nil)
+  )
+)
+
+(defun _angulo-real-entre-muros-conectados (m1 m2 / exts)
+  (setq exts (_extremos-conexion-entre m1 m2))
+  (if exts
+    (_angulo-esquina-desde-extremos m1 (nth 0 exts) m2 (nth 1 exts))
+    (_angulo-entre-vectores-2d (_vector-muro m1) (_vector-muro m2))
+  )
+)
+
+(defun _cruce-espesor-interseccion-caras (muroPropio muroOtro / s espOtro)
+  (setq s (_seno-angulo-entre-muros muroPropio muroOtro))
+  (setq espOtro (nth 7 muroOtro))
+
+  (if (and s espOtro)
+    (/ espOtro s)
+    nil
+  )
+)
+
+(defun _cruce-espesor-compensacion-esquina (muroPropio muroOtro / ang mitad tanMitad espOtro)
+  (setq ang (_angulo-real-entre-muros-conectados muroPropio muroOtro))
+  (setq mitad (/ ang 2.0))
+  (if (not (equal (cos mitad) 0.0 1e-8))
+    (setq tanMitad (/ (sin mitad) (cos mitad)))
+    (setq tanMitad nil)
+  )
+  (setq espOtro (nth 7 muroOtro))
+
+  (if (and tanMitad espOtro (not (equal tanMitad 0.0 1e-8)))
+    (/ espOtro tanMitad)
+    nil
+  )
+)
+
+(defun _compensacion-esquina-teorica (muroPropio muroOtro / cruce)
+  (setq cruce (_cruce-espesor-compensacion-esquina muroPropio muroOtro))
+  (if cruce (+ 20.0 cruce) nil)
+)
+
+(defun _esquina-oblicua-p (e lista / m1 m2 s)
+  (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+  (setq m2 (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+  (setq s (if (and m1 m2) (_seno-angulo-entre-muros m1 m2) nil))
+  (and s (not (equal s 1.0 1e-6)))
 )
 
 (defun _line-intersection-2d (p1 p2 p3 p4 / r s qp den tt)
@@ -2131,8 +2410,9 @@
 (defun _ajuste-extremo-giro      (aj) (cdr (assoc "GIRO" aj)))
 (defun _ajuste-extremo-base      (aj) (cdr (assoc "BASE" aj)))
 (defun _ajuste-extremo-opuesta   (aj) (cdr (assoc "OPUESTA" aj)))
+(defun _ajuste-extremo-cruce-otro (aj) (cdr (assoc "CRUCE_OTRO" aj)))
 
-(defun _hacer-ajuste-extremo (geom m2 tipo giro caras)
+(defun _hacer-ajuste-extremo (geom m2 tipo giro caras cruceOtro)
   (list
     (cons "GEOM" geom)
     (cons "MURO" (_muro-id m2))
@@ -2140,6 +2420,7 @@
     (cons "GIRO" giro)
     (cons "BASE" (cdr (assoc "BASE" caras)))
     (cons "OPUESTA" (cdr (assoc "OPUESTA" caras)))
+    (cons "CRUCE_OTRO" cruceOtro)
   )
 )
 
@@ -2148,7 +2429,7 @@
                                    tipo giro caras
                                    q1 q2 r1 r2
                                    q1b q2b r1b r2b
-                                   pIntBase pIntOpuesta
+                                   pIntBase pIntOpuesta cruceOtro
                                    geom)
 
   (setq d1 (_muro-offset-linea m1))
@@ -2191,8 +2472,9 @@
             )
           )
 
+          (setq cruceOtro (_cruce-espesor-interseccion-caras m1 m2))
           (setq geom (list q1 q2 r1 r2))
-          (_hacer-ajuste-extremo geom m2 tipo giro caras)
+          (_hacer-ajuste-extremo geom m2 tipo giro caras cruceOtro)
         )
       )
     )
@@ -2203,7 +2485,7 @@
                                   tipo giro caras
                                   q1 q2 r1 r2
                                   q1b q2b r1b r2b
-                                  pIntBase pIntOpuesta
+                                  pIntBase pIntOpuesta cruceOtro
                                   geom)
 
   ; geomBase YA es la geometria actual del muro: (q1 q2 r1 r2)
@@ -2251,8 +2533,9 @@
             )
           )
 
+          (setq cruceOtro (_cruce-espesor-interseccion-caras m1 m2))
           (setq geom (list q1 q2 r1 r2))
-          (_hacer-ajuste-extremo geom m2 tipo giro caras)
+          (_hacer-ajuste-extremo geom m2 tipo giro caras cruceOtro)
         )
       )
     )
@@ -2715,11 +2998,11 @@
   res
 )
 (defun _generar-colocaciones-esquinas (lista / res esquinas e
-                                             m1id ext1 m1
-                                             pt tramos tramo
-                                             zBase z0 z1
-                                             piezaBase piezaOpuesta
-                                             bloqueBase bloqueOpuesta)
+                                              m1id ext1 m1
+                                              pt tramos tramo
+                                              zBase z0 z1
+                                              piezaBase piezaOpuesta oblicua
+                                              bloqueBase bloqueOpuesta)
 
   (setq res '())
   (setq esquinas (_recolectar-esquinas-unicas lista))
@@ -2728,8 +3011,9 @@
     (setq m1id (cdr (assoc "MURO1" e)))
     (setq ext1 (cdr (assoc "EXT1" e)))
     (setq m1 (_buscar-muro-por-id m1id lista))
+    (setq oblicua (_esquina-oblicua-p e lista))
 
-    (if m1
+    (if (and m1 (null oblicua))
       (progn
         (setq pt (_punto-interior-esquina m1 lista ext1 e))
 
@@ -3166,6 +3450,267 @@
   (princ)
 )
 
+(defun c:DEPURAR_ESQUINAS_OBLICUAS (/ lista esquinas e m1 m2 ext1 ext2 ang sinAng comp1 comp2 oblicua)
+  (if (null *MUROS*)
+    (prompt "\nNo hay muros cargados.")
+    (progn
+      (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+      (setq esquinas (_recolectar-esquinas-unicas lista))
+
+      (prompt "\n===== DEPURACION ESQUINAS OBLICUAS =====")
+
+      (if esquinas
+        (foreach e esquinas
+          (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+          (setq m2 (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+          (setq ext1 (cdr (assoc "EXT1" e)))
+          (setq ext2 (cdr (assoc "EXT2" e)))
+
+          (if (and m1 m2 ext1 ext2)
+            (progn
+              (setq ang (_angulo-esquina-desde-extremos m1 ext1 m2 ext2))
+              (setq sinAng (_seno-angulo-entre-muros m1 m2))
+              (setq comp1 (_compensacion-esquina-teorica m1 m2))
+              (setq comp2 (_compensacion-esquina-teorica m2 m1))
+              (setq oblicua (not (equal sinAng 1.0 1e-6)))
+
+              (prompt
+                (strcat
+                  "\n\nESQUINA: Muro " (itoa (_muro-id m1)) " " ext1
+                  " <-> Muro " (itoa (_muro-id m2)) " " ext2
+                  "\n  Angulo: " (rtos (* 180.0 (/ ang pi)) 2 4) " grados"
+                  " | sin: " (_fmt-real sinAng)
+                  " | Oblicua: " (if oblicua "SI" "NO")
+                  "\n  Comp Muro " (itoa (_muro-id m1)) ": " (_fmt-real comp1) " cm"
+                  " | Madera: " (_fmt-real (if comp1 (_longitud-madera-encofrado comp1) nil)) " cm"
+                  "\n  Comp Muro " (itoa (_muro-id m2)) ": " (_fmt-real comp2) " cm"
+                  " | Madera: " (_fmt-real (if comp2 (_longitud-madera-encofrado comp2) nil)) " cm"
+                )
+              )
+            )
+          )
+        )
+        (prompt "\nNo se detectaron esquinas unicas.")
+      )
+    )
+  )
+  (princ)
+)
+
+(defun _dbg-linea (p1 p2 color)
+  (if (and p1 p2)
+    (entmakex
+      (list
+        (cons 0 "LINE")
+        (cons 8 (getvar "CLAYER"))
+        (cons 62 color)
+        (cons 10 p1)
+        (cons 11 p2)
+      )
+    )
+  )
+)
+
+(defun _dbg-circulo (p radio color)
+  (if p
+    (entmakex
+      (list
+        (cons 0 "CIRCLE")
+        (cons 8 (getvar "CLAYER"))
+        (cons 62 color)
+        (cons 10 p)
+        (cons 40 radio)
+      )
+    )
+  )
+)
+
+(defun _dbg-texto (p txt color / pt)
+  (if p
+    (progn
+      (setq pt (_vec-add p (list 2.0 2.0 0.0)))
+      (entmakex
+        (list
+          (cons 0 "TEXT")
+          (cons 8 (getvar "CLAYER"))
+          (cons 62 color)
+          (cons 10 pt)
+          (cons 40 4.0)
+          (cons 1 txt)
+          (cons 7 (getvar "TEXTSTYLE"))
+          (cons 50 0.0)
+        )
+      )
+    )
+  )
+)
+
+(defun _depurar-compensacion-oblicua-muro (muro lista extremo / res aj caraComp ancho anchoMod linea arranque pt ang pFin)
+  (setq res (_ajustar-muro-por-extremos-v2 muro lista))
+  (setq aj (if res (cdr (assoc extremo res)) nil))
+
+  (if aj
+    (progn
+      (setq caraComp (_cara-compensacion-en-extremo muro aj))
+      (setq ancho (_ancho-compensacion-en-extremo aj lista muro))
+      (setq anchoMod (_longitud-modular-encofrado ancho))
+      (setq linea (if caraComp (_linea-referencia-compensacion muro res lista caraComp aj) nil))
+
+      (if linea
+        (progn
+          (setq arranque (_datos-arranque-compensacion-segun-ajuste muro lista extremo caraComp aj linea))
+
+          (if (_arranque-valido-p arranque)
+            (progn
+              (setq pt (cdr (assoc "PT" arranque)))
+              (setq ang (cdr (assoc "ANG" arranque)))
+              (setq pFin (_punto-por-angulo-dist pt ang anchoMod))
+
+              (_dbg-linea (nth 0 linea) (nth 1 linea) 3)
+              (_dbg-circulo pt 3.0 1)
+              (_dbg-texto pt
+                (strcat
+                  "ARR COMP M" (itoa (_muro-id muro))
+                  " " extremo
+                  " " caraComp
+                )
+                1
+              )
+              (_dbg-linea pt pFin 1)
+              (_dbg-circulo pFin 2.0 1)
+
+              (prompt
+                (strcat
+                  "\nMuro " (itoa (_muro-id muro))
+                  " " extremo
+                  " | Cara comp: " caraComp
+                  " | Ancho real: " (_fmt-real ancho)
+                  " | Modular: " (_fmt-real anchoMod)
+                  " | PT: " (_fmt-pt2d pt)
+                  " | FIN: " (_fmt-pt2d pFin)
+                )
+              )
+            )
+            (prompt
+              (strcat
+                "\nERROR ARRANQUE COMP: Muro "
+                (itoa (_muro-id muro))
+                " "
+                extremo
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+(defun c:DEPURAR_OBLICUAS_PLANTA (/ lista esquinas e m1 m2 ext1 ext2 ptInt ptExt)
+  (if (null *MUROS*)
+    (prompt "\nNo hay muros cargados.")
+    (progn
+      (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+      (setq esquinas (_recolectar-esquinas-unicas lista))
+      (prompt "\n===== DEPURACION VISUAL OBLICUAS PLANTA =====")
+
+      (if esquinas
+        (foreach e esquinas
+          (if (_esquina-oblicua-p e lista)
+            (progn
+              (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+              (setq m2 (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+              (setq ext1 (cdr (assoc "EXT1" e)))
+              (setq ext2 (cdr (assoc "EXT2" e)))
+
+              (if (and m1 m2)
+                (progn
+                  (setq ptInt (_punto-interior-esquina m1 lista ext1 e))
+                  (setq ptExt (_vertice-exterior-compensacion-oblicua e lista))
+                  (_dbg-circulo ptInt 4.0 2)
+                  (_dbg-texto ptInt "VERTICE INTERIOR" 2)
+                  (_dbg-circulo ptExt 4.0 4)
+                  (_dbg-texto ptExt "VERTICE EXTERIOR COMP" 4)
+                  (_dbg-linea ptExt ptInt 4)
+
+                  (prompt
+                    (strcat
+                      "\n\nESQUINA OBLICUA M"
+                      (itoa (_muro-id m1)) " " ext1
+                      " <-> M" (itoa (_muro-id m2)) " " ext2
+                      " | V_INT: " (_fmt-pt2d ptInt)
+                      " | V_EXT_COMP: " (_fmt-pt2d ptExt)
+                    )
+                  )
+
+                  (_depurar-compensacion-oblicua-muro m1 lista ext1)
+                  (_depurar-compensacion-oblicua-muro m2 lista ext2)
+                )
+              )
+            )
+          )
+        )
+        (prompt "\nNo se detectaron esquinas unicas.")
+      )
+    )
+  )
+  (princ)
+)
+
+(defun _dbg-tipo-resultado (x)
+  (cond
+    ((null x) "nil")
+    ((listp x) (strcat "LISTA len=" (itoa (length x))))
+    ((= x T) "T")
+    (T (vl-princ-to-string x))
+  )
+)
+
+(defun _dbg-probar-generador (nombre expr / r)
+  (prompt (strcat "\nProbando " nombre "..."))
+  (setq r (vl-catch-all-apply expr '()))
+  (if (vl-catch-all-error-p r)
+    (prompt (strcat "\n  ERROR: " (vl-catch-all-error-message r)))
+    (prompt (strcat "\n  OK: " (_dbg-tipo-resultado r)))
+  )
+  r
+)
+
+(defun c:DEPURAR_GENERAR_MURO_COMPLETO (/ lista)
+  (if (null *MUROS*)
+    (prompt "\nNo hay muros cargados.")
+    (progn
+      (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+      (prompt "\n===== DEPURACION GENERAR_MURO_COMPLETO =====")
+
+      (_stock-iniciar-calculo)
+      (_dbg-probar-generador
+        "COMPENSACIONES"
+        '(lambda () (_generar-colocaciones-compensaciones lista))
+      )
+
+      (_stock-iniciar-calculo)
+      (_dbg-probar-generador
+        "RECTAS"
+        '(lambda () (_generar-colocaciones-rectas lista))
+      )
+
+      (_stock-iniciar-calculo)
+      (_dbg-probar-generador
+        "ESQUINAS"
+        '(lambda () (_generar-colocaciones-esquinas lista))
+      )
+
+      (_stock-iniciar-calculo)
+      (_dbg-probar-generador
+        "STOCK_COMP_PREFERENTE"
+        '(lambda () (_generar-cols-stock-comp-preferente lista))
+      )
+    )
+  )
+  (princ)
+)
+
 ; =========================================================
 ; USOS DE PIEZA
 ; =========================================================
@@ -3213,7 +3758,7 @@
 (defun _descomposicion-preferente-medida (medida)
   (cond
     ((equal medida 70.0 1e-8)  '(40 30))
-    ((equal medida 75.0 1e-8)  '(40 20 5))
+    ((equal medida 75.0 1e-8)  '(40 30 5))
     ((equal medida 90.0 1e-8)  '(50 40))
     ((equal medida 95.0 1e-8)  '(50 40 5))
     ((equal medida 110.0 1e-8) '(60 50))
@@ -3279,20 +3824,41 @@
   res
 )
 
-(defun _resolver-descomposicion-preferente-paneles (medida paneles / pref res ancho p)
+(defun _resolver-descomposicion-preferente-paneles (medida paneles / pref res ancho p altura grueso ok)
   (setq pref (_descomposicion-preferente-medida medida))
   (setq res '())
+  (setq altura (if paneles (_cat-alto (car paneles)) nil))
+  (setq grueso
+    (cond
+      ((= altura 150) (_buscar-pieza-por-id "024"))
+      ((= altura 300) (_buscar-pieza-por-id "023"))
+      (T nil)
+    )
+  )
 
   (if pref
     (progn
+      (setq ok T)
       (foreach ancho pref
-        (setq p (_buscar-panel-por-ancho-en-lista paneles ancho))
-        (if p
-          (setq res (append res (list p)))
-          (setq res nil)
+        (if ok
+          (progn
+            (setq p
+              (if (= ancho 5)
+                grueso
+                (_buscar-panel-por-ancho-en-lista paneles ancho)
+              )
+            )
+            (if p
+              (setq res (append res (list p)))
+              (progn
+                (setq res nil)
+                (setq ok nil)
+              )
+            )
+          )
         )
       )
-      res
+      (if ok res nil)
     )
     nil
   )
@@ -5124,7 +5690,12 @@
 )
 
 (defun _longitud-base-cara-muro (muro res lista cara / d a b)
-  (setq d (cdr (assoc "GEOM" res)))
+  (setq d
+    (if (_res-tiene-ajuste-oblicuo-p res lista)
+      (_muro-offset-linea muro)
+      (cdr (assoc "GEOM" res))
+    )
+  )
 
   (if d
     (progn
@@ -5144,11 +5715,27 @@
   )
 )
 
-(defun _descuento-extremo-por-cara (aj lista cara / espOtro tipoCara)
+(defun _cruce-otro-muro-extremo (aj lista / cruce idOtro muroOtro)
+  (setq cruce (_ajuste-extremo-cruce-otro aj))
+
+  (if cruce
+    cruce
+    (progn
+      (setq idOtro (_ajuste-extremo-muro-id aj))
+      (setq muroOtro (_buscar-muro-por-id idOtro lista))
+      (if muroOtro
+        (nth 7 muroOtro)
+        0.0
+      )
+    )
+  )
+)
+
+(defun _descuento-extremo-por-cara (aj lista cara / cruceOtro tipoCara)
   (if (null aj)
     0.0
     (progn
-      (setq espOtro (_espesor-otro-muro-extremo aj lista))
+      (setq cruceOtro (_cruce-otro-muro-extremo aj lista))
 
       (setq tipoCara
         (cond
@@ -5159,8 +5746,14 @@
       )
 
       (cond
+        ((and
+           (_ajuste-oblicuo-p aj lista)
+           (member tipoCara '("INTERIOR" "EXTERIOR"))
+         )
+          20.0
+        )
         ((= tipoCara "INTERIOR") 20.0)
-        ((= tipoCara "EXTERIOR") (+ espOtro 20.0))
+        ((= tipoCara "EXTERIOR") (+ cruceOtro 20.0))
         (T 0.0)
       )
     )
@@ -5183,7 +5776,7 @@
       ;; Si es EXTERIOR, no pre-recortamos; el descuento ya sera espesor+20.
       (cond
         ((= tipoCara "INTERIOR")
-          (_espesor-otro-muro-extremo aj lista)
+          (_cruce-otro-muro-extremo aj lista)
         )
         (T 0.0)
       )
@@ -5558,7 +6151,7 @@
 (defun _generar-colocaciones-compensacion-muro-extremo (muro lista extremo / 
                                                           res aj
                                                           caraComp
-                                                          anchoComp
+                                                          anchoComp anchoModular maderaComp
                                                           linea arranque
                                                           ptBase angDir
                                                           tramos tramo
@@ -5580,85 +6173,106 @@
 
       ; Ancho = espesor del otro muro + 20
       (setq anchoComp (_ancho-compensacion-en-extremo aj lista muro))
+      (setq anchoModular (_longitud-modular-encofrado anchoComp))
+      (setq maderaComp (_longitud-madera-encofrado anchoComp))
 
-      (if (and caraComp anchoComp (> anchoComp 0.0))
+      (if (and caraComp anchoComp (> anchoModular 0.0))
         (progn
-          ; La linea de referencia es la del pao util de ESA cara
-          (setq linea (_linea-cara-ajustada muro res lista caraComp))
+          ; En oblicuas la linea ajustada puede quedar invertida si el muro es corto.
+          ; Para compensacion se arranca desde la cara original del muro.
+          (setq linea (_linea-referencia-compensacion muro res lista caraComp aj))
 
           (if linea
             (progn
-              ; Arranca justo donde acaba el pao util en ese extremo
-              (setq arranque (_datos-arranque-compensacion linea extremo))
-              (setq ptBase (cdr (assoc "PT" arranque)))
-              (setq angDir (cdr (assoc "ANG" arranque)))
+              ; En oblicuas arranca desde el vertice interior proyectado a la cara exterior.
+              (setq arranque (_datos-arranque-compensacion-segun-ajuste muro lista extremo caraComp aj linea))
 
-              (setq tramos (_descomponer-altura-esquina (_altura-media-muro muro)))
+              (if (_arranque-valido-p arranque)
+                (progn
+                  (setq ptBase (cdr (assoc "PT" arranque)))
+                  (setq angDir (cdr (assoc "ANG" arranque)))
 
-              (setq zBase 0.0)
-              (setq bIdx 0)
+                  (setq tramos (_descomponer-altura-esquina (_altura-media-muro muro)))
 
-              (foreach tramo tramos
-                (setq piezas (_resolver-compensacion-solo-paneles anchoComp tramo))
+                  (setq zBase 0.0)
+                  (setq bIdx 0)
 
-                (if piezas
-                  (progn
-                    (_stock-reservar-piezas piezas)
-                    (setq z0 zBase)
-                    (setq z1 (+ zBase tramo))
-                    (setq sAcum 0.0)
+                  (foreach tramo tramos
+                    (setq piezas (_resolver-compensacion-solo-paneles anchoModular tramo))
 
-                    (foreach pieza piezas
-                      (setq bloque (_bloque-de-pieza pieza))
-                      (setq longUso (_cat-ancho pieza))
+                    (if piezas
+                      (progn
+                        (_stock-reservar-piezas piezas)
+                        (setq z0 zBase)
+                        (setq z1 (+ zBase tramo))
+                        (setq sAcum 0.0)
 
-                      (setq pIni (_punto-por-angulo-dist ptBase angDir sAcum))
-                      (setq pFin (_punto-por-angulo-dist ptBase angDir (+ sAcum longUso)))
+                        (foreach pieza piezas
+                          (setq bloque (_bloque-de-pieza pieza))
+                          (setq longUso (_cat-ancho pieza))
 
-                      (setq col
-			  (append
-			    (_hacer-colocacion-pieza
-			      pieza
-			      muro
-			      caraComp
-			      bIdx
-			      sAcum
-			      (+ sAcum longUso)
-			      z0
-			      z1
-			      pIni
-			      pFin
-			      angDir
-			      "NO"
-			      bloque
-			    )
+                          (setq pIni (_punto-por-angulo-dist ptBase angDir sAcum))
+                          (setq pFin (_punto-por-angulo-dist ptBase angDir (+ sAcum longUso)))
+
+                          (setq col
+                            (append
+                              (_hacer-colocacion-pieza
+                                pieza
+                                muro
+                                caraComp
+                                bIdx
+                                sAcum
+                                (+ sAcum longUso)
+                                z0
+                                z1
+                                pIni
+                                pFin
+                                angDir
+                                "NO"
+                                bloque
+                              )
 			    (list
 			      (cons "EXTREMO" extremo)
 			      (cons "ORIGEN" "COMPENSACION")
+			      (cons "OBLICUA" (if (_ajuste-oblicuo-p aj lista) "SI" "NO"))
 			    )
 			  )
 			)
 
-                      (setq resCols (append resCols (list col)))
-                      (setq sAcum (+ sAcum longUso))
+                          (setq resCols (append resCols (list col)))
+                          (setq sAcum (+ sAcum longUso))
+                        )
+                      )
+                      (prompt
+                        (strcat
+                          "\nERROR COMPENSACION: no se pudo resolver ancho "
+                          (rtos anchoComp 2 2)
+                          " | Modular "
+                          (rtos anchoModular 2 2)
+                          " | Madera "
+                          (rtos maderaComp 2 2)
+                          " para tramo "
+                          (rtos tramo 2 2)
+                          " en muro "
+                          (itoa (_muro-id muro))
+                          " extremo "
+                          extremo
+                        )
+                      )
                     )
-                  )
-                  (prompt
-                    (strcat
-                      "\nERROR COMPENSACION: no se pudo resolver ancho "
-                      (rtos anchoComp 2 2)
-                      " para tramo "
-                      (rtos tramo 2 2)
-                      " en muro "
-                      (itoa (_muro-id muro))
-                      " extremo "
-                      extremo
-                    )
+
+                    (setq zBase (+ zBase tramo))
+                    (setq bIdx (1+ bIdx))
                   )
                 )
-
-                (setq zBase (+ zBase tramo))
-                (setq bIdx (1+ bIdx))
+                (prompt
+                  (strcat
+                    "\nERROR ARRANQUE COMP: Muro "
+                    (itoa (_muro-id muro))
+                    " "
+                    extremo
+                  )
+                )
               )
             )
           )
@@ -5692,6 +6306,115 @@
       (setq res
         (append res
           (_generar-colocaciones-compensacion-muro-extremo m2 lista ext2)
+        )
+      )
+    )
+  )
+
+  res
+)
+
+(defun _generar-colocaciones-madera-compensacion-muro-extremo (muro lista extremo /
+                                                                 res aj caraComp
+                                                                 anchoComp anchoModular maderaComp
+                                                                 linea arranque ptBase angDir
+                                                                 tramos tramo zBase z0 z1
+                                                                 pIni pFin col resCols)
+  (setq resCols '())
+
+  (setq res (_ajustar-muro-por-extremos-v2 muro lista))
+  (setq aj (if res (cdr (assoc extremo res)) nil))
+
+  (if aj
+    (progn
+      (setq caraComp (_cara-compensacion-en-extremo muro aj))
+      (setq anchoComp (_ancho-compensacion-en-extremo aj lista muro))
+      (setq anchoModular (_longitud-modular-encofrado anchoComp))
+      (setq maderaComp (_longitud-madera-encofrado anchoComp))
+
+      (if (and
+            (_ajuste-oblicuo-p aj lista)
+            caraComp
+            anchoComp
+            (> maderaComp 1e-6)
+          )
+        (progn
+          (setq linea (_linea-referencia-compensacion muro res lista caraComp aj))
+          (setq arranque
+            (if linea
+              (_datos-arranque-compensacion-segun-ajuste muro lista extremo caraComp aj linea)
+              nil
+            )
+          )
+
+          (if (_arranque-valido-p arranque)
+            (progn
+              (setq ptBase (cdr (assoc "PT" arranque)))
+              (setq angDir (cdr (assoc "ANG" arranque)))
+              (setq tramos (_descomponer-altura-esquina (_altura-media-muro muro)))
+              (setq zBase 0.0)
+
+              (foreach tramo tramos
+                (setq z0 zBase)
+                (setq z1 (+ zBase tramo))
+                (setq pIni (_punto-por-angulo-dist ptBase angDir anchoModular))
+                (setq pFin (_punto-por-angulo-dist ptBase angDir anchoComp))
+
+                (setq col
+                  (append
+                    (_hacer-colocacion-madera-z
+                      muro
+                      caraComp
+                      extremo
+                      anchoModular
+                      anchoComp
+                      pIni
+                      pFin
+                      z0
+                      z1
+                    )
+                    (list
+                      (cons "OBLICUA" "SI")
+                      (cons "ORIGEN_COMPENSACION" "SI")
+                    )
+                  )
+                )
+
+                (setq resCols (append resCols (list col)))
+                (setq zBase (+ zBase tramo))
+              )
+            )
+          )
+        )
+      )
+    )
+  )
+
+  resCols
+)
+
+(defun _generar-colocaciones-madera-compensaciones (lista / res esquinas e m1 m2 ext1 ext2)
+  (setq res '())
+  (setq esquinas (_recolectar-esquinas-unicas lista))
+
+  (foreach e esquinas
+    (setq m1   (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+    (setq m2   (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+    (setq ext1 (cdr (assoc "EXT1" e)))
+    (setq ext2 (cdr (assoc "EXT2" e)))
+
+    (if m1
+      (setq res
+        (append res
+          (_generar-colocaciones-madera-compensacion-muro-extremo m1 lista ext1)
+        )
+      )
+    )
+
+    (if m2
+      (setq res
+        (append res
+          (_generar-colocaciones-madera-compensacion-muro-extremo m2 lista ext2)
         )
       )
     )
@@ -5741,7 +6464,7 @@
 ; No forman parte del despiece, stock ni tornilleria.
 ; =========================================================
 
-(defun _hacer-colocacion-madera (muro cara extremo s0 s1 p0 p1 altura)
+(defun _hacer-colocacion-madera-z (muro cara extremo s0 s1 p0 p1 z0 z1)
   (list
     (cons "PIEZA" nil)
     (cons "MURO" (_muro-id muro))
@@ -5749,8 +6472,8 @@
     (cons "BANDA" 0)
     (cons "S0" s0)
     (cons "S1" s1)
-    (cons "Z0" 0.0)
-    (cons "Z1" altura)
+    (cons "Z0" z0)
+    (cons "Z1" z1)
     (cons "P0" p0)
     (cons "P1" p1)
     (cons "ANG" (angle p0 p1))
@@ -5760,6 +6483,10 @@
     (cons "ORIGEN_BANDA" "MADERA")
     (cons "EXTREMO" extremo)
   )
+)
+
+(defun _hacer-colocacion-madera (muro cara extremo s0 s1 p0 p1 altura)
+  (_hacer-colocacion-madera-z muro cara extremo s0 s1 p0 p1 0.0 altura)
 )
 
 (defun _generar-colocacion-madera-cara (muro res lista cara /
@@ -5834,7 +6561,12 @@
 )
 
 (defun _imprimir-resumen-madera (lista / cols c)
-  (setq cols (_generar-colocaciones-madera lista))
+  (setq cols
+    (append
+      (_generar-colocaciones-madera lista)
+      (_generar-colocaciones-madera-compensaciones lista)
+    )
+  )
 
   (if cols
     (progn
@@ -5845,12 +6577,28 @@
             "\nMuro " (itoa (_col-muro c))
             " | Cara " (_col-cara c)
             " | Madera: " (rtos (_longitud-uso-colocacion c) 2 2) " cm"
+            " | Origen: "
+            (if (= (cdr (assoc "ORIGEN_COMPENSACION" c)) "SI")
+              "COMPENSACION"
+              "PANO"
+            )
             " | Posicion: " (_fmt-str (_col-extremo c)) " del pano"
           )
         )
       )
     )
   )
+)
+
+(defun c:LISTAR_MADERA (/ lista)
+  (if (null *MUROS*)
+    (prompt "\nNo hay muros cargados.")
+    (progn
+      (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+      (_imprimir-resumen-madera lista)
+    )
+  )
+  (princ)
 )
 ; =========================================================
 ; PIEZAS DE ESQUINA
@@ -6071,8 +6819,9 @@
   sol
 )
 
-(defun _items-compensacion-esquina-tramo (muroId extremo cara ancho tramo / piezas)
-  (setq piezas (_uso-vertical-exacto-o-exceso-para-tramo ancho tramo))
+(defun _items-compensacion-esquina-tramo (muroId extremo cara ancho tramo / piezas anchoModular)
+  (setq anchoModular (_longitud-modular-encofrado ancho))
+  (setq piezas (_uso-vertical-exacto-o-exceso-para-tramo anchoModular tramo))
 
   (if piezas
     (_piezas-a-items-despiece piezas "ESQUINA" muroId extremo cara)
@@ -6113,10 +6862,11 @@
   items
 )
 (defun _hacer-items-compensacion-esquina-tramo (e lista tramo / items
-                                                  m1id m2id ext1 ext2
-                                                  m1 m2
-                                                  anchoComp1 anchoComp2
-                                                  piezas1 piezas2)
+                                                   m1id m2id ext1 ext2
+                                                   m1 m2
+                                                   anchoComp1 anchoComp2
+                                                   anchoComp1Mod anchoComp2Mod
+                                                   piezas1 piezas2)
   (setq items '())
 
   (setq m1id (cdr (assoc "MURO1" e)))
@@ -6130,7 +6880,8 @@
   (if (and m1 m2)
     (progn
       (setq anchoComp1 (_ancho-compensacion-esquina-entre-muros m1 m2))
-      (setq piezas1 (_resolver-compensacion-solo-paneles anchoComp1 tramo))
+      (setq anchoComp1Mod (_longitud-modular-encofrado anchoComp1))
+      (setq piezas1 (_resolver-compensacion-solo-paneles anchoComp1Mod tramo))
 
       (if *DEBUG-COMPENSACION*
         (prompt
@@ -6152,7 +6903,8 @@
       )
 
       (setq anchoComp2 (_ancho-compensacion-esquina-entre-muros m2 m1))
-      (setq piezas2 (_resolver-compensacion-solo-paneles anchoComp2 tramo))
+      (setq anchoComp2Mod (_longitud-modular-encofrado anchoComp2))
+      (setq piezas2 (_resolver-compensacion-solo-paneles anchoComp2Mod tramo))
 
       (if *DEBUG-COMPENSACION*
         (prompt
@@ -6190,7 +6942,7 @@
 )
 (defun _hacer-registro-esquina-despiece-v2 (e lista / m1id m2id ext1 ext2
                                               m1 altura tramos tramo
-                                              itemsTramo itemsTotales)
+                                              itemsTramo itemsTotales oblicua)
   (setq m1id (cdr (assoc "MURO1" e)))
   (setq m2id (cdr (assoc "MURO2" e)))
   (setq ext1 (cdr (assoc "EXT1" e)))
@@ -6198,6 +6950,7 @@
 
   (setq m1 (_buscar-muro-por-id m1id lista))
   (setq itemsTotales '())
+  (setq oblicua (_esquina-oblicua-p e lista))
 
   (if m1
     (progn
@@ -6207,9 +6960,11 @@
       (foreach tramo tramos
         (setq itemsTramo '())
 
-        (setq itemsTramo
-          (append itemsTramo
-            (_hacer-items-angulos-esquina-tramo e tramo)
+        (if (null oblicua)
+          (setq itemsTramo
+            (append itemsTramo
+              (_hacer-items-angulos-esquina-tramo e tramo)
+            )
           )
         )
 
@@ -6248,7 +7003,7 @@
   res
 )
 (defun _ancho-compensacion-esquina-entre-muros (muroPropio muroOtro)
-  (+ (nth 7 muroOtro) 20.0)
+  (_compensacion-esquina-teorica muroPropio muroOtro)
 )
 (defun _paneles-por-altura-para-compensacion (altura / res item)
   (setq res '())
@@ -6815,7 +7570,208 @@
   (list ok nok)
 )
 
-(defun _correccion-espesor-colocacion (c / cara n origen extremo muro ref)
+(defun _normal-hacia-vector (u objetivo / n n2)
+  (setq n (list (- (cadr u)) (car u) 0.0))
+  (setq n2 (_vec-scale n -1.0))
+  (if (>= (_2d-dot n objetivo) (_2d-dot n2 objetivo))
+    n
+    n2
+  )
+)
+
+(defun _crear-prisma-rectangular-eje (p0 p1 off z0 z1 color / q0 q1 perfil region sol altura)
+  (setq altura (- z1 z0))
+
+  (if (> altura 1e-8)
+    (progn
+      (setq q0 (_vec-add p0 off))
+      (setq q1 (_vec-add p1 off))
+      (setq perfil (_crear-lwpoly-cerrada-2d (list p0 p1 q1 q0)))
+      (setq region (_crear-region-desde-entidad perfil))
+
+      (if (and perfil (entget perfil))
+        (entdel perfil)
+      )
+
+      (setq sol
+        (if region
+          (_extruir-region region altura)
+          nil
+        )
+      )
+
+      (if (and region (entget region))
+        (entdel region)
+      )
+
+      (if sol
+        (progn
+          (_mover-entidad-z sol z0)
+          (if color (_poner-color-entidad sol color))
+          sol
+        )
+        nil
+      )
+    )
+    nil
+  )
+)
+
+(defun _ancho-ala-angulo-interior (e tramo / pieza)
+  (setq pieza
+    (cond
+      ((= (cdr (assoc "BASE_TIPO" e)) "INTERIOR")
+        (_pieza-angular-esquina-por-cara-y-tramo e "BASE" tramo)
+      )
+      ((= (cdr (assoc "OPUESTA_TIPO" e)) "INTERIOR")
+        (_pieza-angular-esquina-por-cara-y-tramo e "OPUESTA" tramo)
+      )
+      (T nil)
+    )
+  )
+
+  (if pieza
+    (_cat-ancho pieza)
+    *def-ala-angulo-interior*
+  )
+)
+
+(defun _dibujar-angulo-interior-oblicuo-tramo (e lista z0 z1 tramo /
+                                                 m1 m2 ext1 ext2 pt u1 u2 ancho esp
+                                                 p1 p2 n1 n2 s1 s2 sol)
+  (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+  (setq m2 (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+  (setq ext1 (cdr (assoc "EXT1" e)))
+  (setq ext2 (cdr (assoc "EXT2" e)))
+
+  (if (and m1 m2 ext1 ext2 (_cara-interior-esquina e))
+    (progn
+      (setq pt (_punto-interior-esquina m1 lista ext1 e))
+      (setq u1 (_dir-extremo-muro m1 ext1))
+      (setq u2 (_dir-extremo-muro m2 ext2))
+      (setq ancho (_ancho-ala-angulo-interior e tramo))
+      (setq esp *def-espesor-chapa*)
+
+      (if (and pt u1 u2 ancho esp)
+        (progn
+          (setq p1 (_vec-add pt (_vec-scale u1 ancho)))
+          (setq p2 (_vec-add pt (_vec-scale u2 ancho)))
+          (setq n1 (_normal-hacia-vector u1 u2))
+          (setq n2 (_normal-hacia-vector u2 u1))
+
+          (setq s1 (_crear-prisma-rectangular-eje pt p1 (_vec-scale n1 esp) z0 z1 nil))
+          (setq s2 (_crear-prisma-rectangular-eje pt p2 (_vec-scale n2 esp) z0 z1 nil))
+          (setq sol (_unionar-solidos (list s1 s2)))
+          (if (null sol)
+            (setq sol
+              (cond
+                ((and s1 (entget s1)) s1)
+                ((and s2 (entget s2)) s2)
+                (T nil)
+              )
+            )
+          )
+
+          (if sol
+            sol
+            nil
+          )
+        )
+        nil
+      )
+    )
+    nil
+  )
+)
+
+(defun _dibujar-angulos-interiores-oblicuos (lista / ok nok esquinas e m1 tramos tramo z0 z1 sol)
+  (setq ok 0)
+  (setq nok 0)
+  (setq esquinas (_recolectar-esquinas-unicas lista))
+
+  (foreach e esquinas
+    (if (and (_esquina-oblicua-p e lista) (_cara-interior-esquina e))
+      (progn
+        (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+        (setq tramos (if m1 (_descomponer-altura-esquina (_altura-media-muro m1)) nil))
+        (setq z0 0.0)
+
+        (if tramos
+          (foreach tramo tramos
+            (setq z1 (+ z0 tramo))
+            (setq sol (_dibujar-angulo-interior-oblicuo-tramo e lista z0 z1 tramo))
+            (if sol
+              (setq ok (1+ ok))
+              (setq nok (1+ nok))
+            )
+            (setq z0 z1)
+          )
+          (setq nok (1+ nok))
+        )
+      )
+    )
+  )
+
+  (list ok nok)
+)
+
+(defun c:DIBUJAR_ANGULOS_INTERIORES_OBLICUOS (/ lista r)
+  (if (null *MUROS*)
+    (prompt "\nNo hay muros cargados.")
+    (progn
+      (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+      (setq r (_dibujar-angulos-interiores-oblicuos lista))
+      (prompt
+        (strcat
+          "\nAngulos interiores oblicuos dibujados: " (itoa (car r))
+          " | Fallidos: " (itoa (cadr r))
+        )
+      )
+    )
+  )
+  (princ)
+)
+
+(defun _correccion-oblicua-compensacion (c / lista muro extremo e vInt n corr0 corr1 p0 centro0 centro1 espChapa)
+  (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+  (setq muro (_buscar-muro-por-id (_col-muro c) lista))
+  (setq extremo (_col-extremo c))
+  (setq e
+    (if (and muro extremo)
+      (_esquina-por-muro-extremo-cualquiera lista (_muro-id muro) extremo)
+      nil
+    )
+  )
+  (setq vInt
+    (if (and muro e extremo)
+      (_punto-interior-esquina muro lista extremo e)
+      nil
+    )
+  )
+
+  (if vInt
+    (progn
+      (setq n (_normal-tramo-colocacion c))
+      (setq p0 (_col-p0 c))
+      (setq espChapa *def-espesor-chapa*)
+      (setq corr0 '(0.0 0.0 0.0))
+      (setq corr1 (_vec-scale n espChapa))
+
+      ;; Los bloques desarrollan el espesor hacia la derecha de su eje local.
+      ;; Probamos las dos aristas posibles y dejamos fuera la que aleja mas el centro del vertice interior.
+      (setq centro0 (_vec-add p0 (_vec-scale n (- (/ espChapa 2.0)))))
+      (setq centro1 (_vec-add (_vec-add p0 corr1) (_vec-scale n (- (/ espChapa 2.0)))))
+
+      (if (>= (distance centro0 vInt) (distance centro1 vInt))
+        corr0
+        corr1
+      )
+    )
+    nil
+  )
+)
+
+(defun _correccion-espesor-colocacion (c / cara n origen extremo muro ref corrOblicua)
   (setq cara    (_col-cara c))
   (setq n       (_normal-tramo-colocacion c))
   (setq origen  (_col-origen c))
@@ -6824,6 +7780,14 @@
   (setq ref     (if muro (nth 9 muro) nil))
 
   (cond
+    ((and
+       (or (= origen "COMPENSACION") (= origen "MADERA"))
+       (= (_col-oblicua c) "SI")
+     )
+      (setq corrOblicua (_correccion-oblicua-compensacion c))
+      (if corrOblicua corrOblicua '(0.0 0.0 0.0))
+    )
+
     ; --------------------------------------------------
     ; RECTOS
     ; --------------------------------------------------
@@ -9717,7 +10681,7 @@
   (princ)
 )
 
-(defun c:GENERAR_MURO_COMPLETO (/ lista datos colsRectas colsComp colsEsq colsMadera r1 r2 r3 r4 ok nok)
+(defun c:GENERAR_MURO_COMPLETO (/ lista datos colsRectas colsComp colsEsq colsMadera r1 r2 r3 r4 r5 ok nok)
   (setq ok 0)
   (setq nok 0)
   (if (null *MUROS*)
@@ -9730,7 +10694,12 @@
       (setq colsRectas (cdr (assoc "RECTAS" datos)))
       (setq colsComp   (cdr (assoc "COMP" datos)))
       (setq colsEsq    (cdr (assoc "ESQ" datos)))
-      (setq colsMadera (_generar-colocaciones-madera lista))
+      (setq colsMadera
+        (append
+          (_generar-colocaciones-madera lista)
+          (_generar-colocaciones-madera-compensaciones lista)
+        )
+      )
 
       (prompt "\n===== GENERANDO MURO COMPLETO =====")
       (prompt "\nCRITERIO STOCK: compensaciones con prioridad flexible.")
@@ -9749,6 +10718,11 @@
       (setq ok  (+ ok  (car r3)))
       (setq nok (+ nok (cadr r3)))
       (prompt (strcat "\nEsquinas insertadas: " (itoa (car r3)) " | Fallidas: " (itoa (cadr r3))))
+
+      (setq r5 (_dibujar-angulos-interiores-oblicuos lista))
+      (setq ok  (+ ok  (car r5)))
+      (setq nok (+ nok (cadr r5)))
+      (prompt (strcat "\nAngulos interiores oblicuos dibujados: " (itoa (car r5)) " | Fallidos: " (itoa (cadr r5))))
 
       (setq r4 (_dibujar-colocaciones-madera colsMadera))
       (setq ok  (+ ok  (car r4)))
@@ -10981,6 +11955,31 @@
   (_ayuda-cmd
     "LISTAR_COLOCACIONES_COMPENSACION"
     "Lista compensaciones generadas."
+  )
+
+  (_ayuda-cmd
+    "LISTAR_MADERA"
+    "Lista madera fuera de despiece, incluyendo compensaciones oblicuas."
+  )
+
+  (_ayuda-cmd
+    "DEPURAR_ESQUINAS_OBLICUAS"
+    "Muestra angulo real y compensacion teorica de cada esquina."
+  )
+
+  (_ayuda-cmd
+    "DEPURAR_OBLICUAS_PLANTA"
+    "Dibuja vertices, arranques y tramos de compensacion oblicua."
+  )
+
+  (_ayuda-cmd
+    "DIBUJAR_ANGULOS_INTERIORES_OBLICUOS"
+    "Dibuja los angulos interiores oblicuos como solidos unidos por tramo de altura."
+  )
+
+  (_ayuda-cmd
+    "DEPURAR_GENERAR_MURO_COMPLETO"
+    "Prueba por separado rectos, compensaciones, esquinas y stock."
   )
 
   ;; -------------------------------------------------
