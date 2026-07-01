@@ -1550,11 +1550,10 @@
 
 (defun _linea-cara-ajustada (muro res lista cara / d a b descIni descFin u)
   ;; En esquinas oblicuas la compensacion se genera aparte.
-  ;; El tramo recto debe medirse desde la linea original del muro, no desde
-  ;; la prolongacion/interseccion de caras, porque eso mete la compensacion
-  ;; dentro del pano recto.
+  ;; La cara exterior debe medirse desde la linea original para reservar
+  ;; la compensacion. La interior debe usar la interseccion real del angulo.
   (setq d
-    (if (_res-tiene-ajuste-oblicuo-p res lista)
+    (if (_cara-con-ajuste-oblicuo-exterior-p res lista cara)
       (_muro-offset-linea muro)
       (cdr (assoc "GEOM" res))
     )
@@ -2412,8 +2411,9 @@
 (defun _ajuste-extremo-base      (aj) (cdr (assoc "BASE" aj)))
 (defun _ajuste-extremo-opuesta   (aj) (cdr (assoc "OPUESTA" aj)))
 (defun _ajuste-extremo-cruce-otro (aj) (cdr (assoc "CRUCE_OTRO" aj)))
+(defun _ajuste-extremo-compensacion (aj) (cdr (assoc "COMPENSACION" aj)))
 
-(defun _hacer-ajuste-extremo (geom m2 tipo giro caras cruceOtro)
+(defun _hacer-ajuste-extremo (geom m2 tipo giro caras cruceOtro compensacion)
   (list
     (cons "GEOM" geom)
     (cons "MURO" (_muro-id m2))
@@ -2422,6 +2422,7 @@
     (cons "BASE" (cdr (assoc "BASE" caras)))
     (cons "OPUESTA" (cdr (assoc "OPUESTA" caras)))
     (cons "CRUCE_OTRO" cruceOtro)
+    (cons "COMPENSACION" compensacion)
   )
 )
 
@@ -2475,7 +2476,15 @@
 
           (setq cruceOtro (_cruce-espesor-interseccion-caras m1 m2))
           (setq geom (list q1 q2 r1 r2))
-          (_hacer-ajuste-extremo geom m2 tipo giro caras cruceOtro)
+          (_hacer-ajuste-extremo
+            geom
+            m2
+            tipo
+            giro
+            caras
+            cruceOtro
+            (_compensacion-esquina-teorica m1 m2)
+          )
         )
       )
     )
@@ -2536,7 +2545,15 @@
 
           (setq cruceOtro (_cruce-espesor-interseccion-caras m1 m2))
           (setq geom (list q1 q2 r1 r2))
-          (_hacer-ajuste-extremo geom m2 tipo giro caras cruceOtro)
+          (_hacer-ajuste-extremo
+            geom
+            m2
+            tipo
+            giro
+            caras
+            cruceOtro
+            (_compensacion-esquina-teorica m1 m2)
+          )
         )
       )
     )
@@ -2796,7 +2813,6 @@
     nil
   )
 )
-
 
 (defun _hacer-colocacion-esquina (pieza muro extremo cara tramo z0 z1 pt ang bloque)
   (list
@@ -5690,9 +5706,21 @@
   )
 )
 
+(defun _cara-con-ajuste-oblicuo-exterior-p (res lista cara / ini fin tipoIni tipoFin)
+  (setq ini (cdr (assoc "INICIO" res)))
+  (setq fin (cdr (assoc "FINAL"  res)))
+  (setq tipoIni (_tipo-cara-en-ajuste ini cara))
+  (setq tipoFin (_tipo-cara-en-ajuste fin cara))
+
+  (or
+    (and (_ajuste-oblicuo-p ini lista) (= tipoIni "EXTERIOR"))
+    (and (_ajuste-oblicuo-p fin lista) (= tipoFin "EXTERIOR"))
+  )
+)
+
 (defun _longitud-base-cara-muro (muro res lista cara / d a b)
   (setq d
-    (if (_res-tiene-ajuste-oblicuo-p res lista)
+    (if (_cara-con-ajuste-oblicuo-exterior-p res lista cara)
       (_muro-offset-linea muro)
       (cdr (assoc "GEOM" res))
     )
@@ -5732,11 +5760,12 @@
   )
 )
 
-(defun _descuento-extremo-por-cara (aj lista cara / cruceOtro tipoCara)
+(defun _descuento-extremo-por-cara (aj lista cara / cruceOtro tipoCara comp)
   (if (null aj)
     0.0
     (progn
       (setq cruceOtro (_cruce-otro-muro-extremo aj lista))
+      (setq comp (_ajuste-extremo-compensacion aj))
 
       (setq tipoCara
         (cond
@@ -5749,9 +5778,15 @@
       (cond
         ((and
            (_ajuste-oblicuo-p aj lista)
-           (member tipoCara '("INTERIOR" "EXTERIOR"))
+           (= tipoCara "INTERIOR")
          )
           20.0
+        )
+        ((and
+           (_ajuste-oblicuo-p aj lista)
+           (= tipoCara "EXTERIOR")
+         )
+          (if comp comp (+ cruceOtro 20.0))
         )
         ((= tipoCara "INTERIOR") 20.0)
         ((= tipoCara "EXTERIOR") (+ cruceOtro 20.0))
@@ -6658,6 +6693,62 @@
   )
 )
 
+(defun _cara-interior-muro-extremo (muro lista extremo / aj)
+  (setq aj (_ajuste-de-muro-extremo muro lista extremo))
+  (if aj
+    (_cara-interior-en-ajuste aj)
+    nil
+  )
+)
+
+(defun _punto-interior-esquina-oblicua (e lista / m1 m2 ext1 ext2 c1 c2 l1 l2)
+  (setq m1 (_buscar-muro-por-id (cdr (assoc "MURO1" e)) lista))
+  (setq m2 (_buscar-muro-por-id (cdr (assoc "MURO2" e)) lista))
+  (setq ext1 (cdr (assoc "EXT1" e)))
+  (setq ext2 (cdr (assoc "EXT2" e)))
+
+  (if (and m1 m2 ext1 ext2)
+    (progn
+      (setq c1 (_cara-interior-muro-extremo m1 lista ext1))
+      (setq c2 (_cara-interior-muro-extremo m2 lista ext2))
+      (setq l1 (if c1 (_linea-cara-sin-ajustar m1 c1) nil))
+      (setq l2 (if c2 (_linea-cara-sin-ajustar m2 c2) nil))
+
+      (if (and l1 l2)
+        (_line-intersection-2d (nth 0 l1) (nth 1 l1) (nth 0 l2) (nth 1 l2))
+        nil
+      )
+    )
+    nil
+  )
+)
+
+(defun _buscar-pieza-esquina-abisagrada-por-tipo-y-altura (tipo altura / alturaRef)
+  (setq alturaRef
+    (cond
+      ((equal altura 150.0 1e-8) 150)
+      ((equal altura 300.0 1e-8) 300)
+      (T nil)
+    )
+  )
+
+  (cond
+    ((and (= tipo "INTERIOR") (= alturaRef 300))
+      (_buscar-pieza-por-id "016")
+    )
+    ((and (= tipo "INTERIOR") (= alturaRef 150))
+      (_buscar-pieza-por-id "018")
+    )
+    ((and (= tipo "EXTERIOR") (= alturaRef 300))
+      (_buscar-pieza-por-id "020")
+    )
+    ((and (= tipo "EXTERIOR") (= alturaRef 150))
+      (_buscar-pieza-por-id "022")
+    )
+    (T nil)
+  )
+)
+
 (defun _pieza-esquina-por-ajuste (muro aj / tipo altura)
   (setq tipo (_tipo-pieza-esquina-desde-ajuste aj))
   (setq altura (_altura-media-muro muro))
@@ -6839,6 +6930,10 @@
   (_buscar-pieza-esquina-por-tipo-y-altura tipo tramo)
 )
 
+(defun _pieza-esquina-abisagrada-por-tipo-y-tramo (tipo tramo)
+  (_buscar-pieza-esquina-abisagrada-por-tipo-y-altura tipo tramo)
+)
+
 (defun _uso-vertical-exacto-o-exceso-para-tramo (ancho tramo / sol)
   (setq sol (_descomponer-ancho-modular-exacto ancho tramo))
   (if (null sol)
@@ -6889,6 +6984,40 @@
 
   items
 )
+
+(defun _hacer-items-angulos-oblicuos-esquina-tramo (e tramo / items caras tipoBase tipoOpuesta piezaBase piezaOpuesta)
+  (setq items '())
+  (setq caras (cdr (assoc "CARAS" e)))
+
+  (setq tipoBase (_tipo-esquina-unica-por-cara e "BASE"))
+  (setq piezaBase (_pieza-esquina-abisagrada-por-tipo-y-tramo tipoBase tramo))
+
+  (if piezaBase
+    (setq items
+      (append items
+        (list (_pieza-despiece piezaBase 1 "ESQUINA" 0 "-" "ANGULO_BASE_OBLICUO"))
+      )
+    )
+  )
+
+  (if (= caras 2)
+    (progn
+      (setq tipoOpuesta (_tipo-esquina-unica-por-cara e "OPUESTA"))
+      (setq piezaOpuesta (_pieza-esquina-abisagrada-por-tipo-y-tramo tipoOpuesta tramo))
+
+      (if piezaOpuesta
+        (setq items
+          (append items
+            (list (_pieza-despiece piezaOpuesta 1 "ESQUINA" 0 "-" "ANGULO_OPUESTA_OBLICUO"))
+          )
+        )
+      )
+    )
+  )
+
+  items
+)
+
 (defun _hacer-items-compensacion-esquina-tramo (e lista tramo / items
                                                    m1id m2id ext1 ext2
                                                    m1 m2
@@ -6988,7 +7117,12 @@
       (foreach tramo tramos
         (setq itemsTramo '())
 
-        (if (null oblicua)
+        (if oblicua
+          (setq itemsTramo
+            (append itemsTramo
+              (_hacer-items-angulos-oblicuos-esquina-tramo e tramo)
+            )
+          )
           (setq itemsTramo
             (append itemsTramo
               (_hacer-items-angulos-esquina-tramo e tramo)
@@ -7674,7 +7808,10 @@
 
   (if (and m1 m2 ext1 ext2 (_cara-interior-esquina e))
     (progn
-      (setq pt (_punto-interior-esquina m1 lista ext1 e))
+      (setq pt (_punto-interior-esquina-oblicua e lista))
+      (if (null pt)
+        (setq pt (_punto-interior-esquina m1 lista ext1 e))
+      )
       (setq u1 (_dir-extremo-muro m1 ext1))
       (setq u2 (_dir-extremo-muro m2 ext2))
       (setq ancho (_ancho-ala-angulo-interior e tramo))
