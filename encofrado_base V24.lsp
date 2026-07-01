@@ -6158,7 +6158,8 @@
                                                           piezas pieza bloque
                                                           zBase z0 z1
                                                           bIdx
-                                                          sAcum longUso
+                                                          sAcum longUso maderaInicio
+                                                          sIniDibujo sFinDibujo
                                                           pIni pFin
                                                           col resCols)
   (setq resCols '())
@@ -6206,13 +6207,32 @@
                         (setq z0 zBase)
                         (setq z1 (+ zBase tramo))
                         (setq sAcum 0.0)
+                        (setq maderaInicio
+                          (if (and (> maderaComp 1e-6) (> (length piezas) 1))
+                            (_cat-ancho (car piezas))
+                            0.0
+                          )
+                        )
 
                         (foreach pieza piezas
                           (setq bloque (_bloque-de-pieza pieza))
                           (setq longUso (_cat-ancho pieza))
 
-                          (setq pIni (_punto-por-angulo-dist ptBase angDir sAcum))
-                          (setq pFin (_punto-por-angulo-dist ptBase angDir (+ sAcum longUso)))
+                          (setq sIniDibujo
+                            (if (and (> maderaComp 1e-6) (>= sAcum maderaInicio))
+                              (+ sAcum maderaComp)
+                              sAcum
+                            )
+                          )
+                          (setq sFinDibujo
+                            (if (and (> maderaComp 1e-6) (> (+ sAcum longUso) maderaInicio))
+                              (+ sAcum longUso maderaComp)
+                              (+ sAcum longUso)
+                            )
+                          )
+
+                          (setq pIni (_punto-por-angulo-dist ptBase angDir sIniDibujo))
+                          (setq pFin (_punto-por-angulo-dist ptBase angDir sFinDibujo))
 
                           (setq col
                             (append
@@ -6319,6 +6339,7 @@
                                                                  anchoComp anchoModular maderaComp
                                                                  linea arranque ptBase angDir
                                                                  tramos tramo zBase z0 z1
+                                                                 piezas maderaInicio
                                                                  pIni pFin col resCols)
   (setq resCols '())
 
@@ -6333,7 +6354,6 @@
       (setq maderaComp (_longitud-madera-encofrado anchoComp))
 
       (if (and
-            (_ajuste-oblicuo-p aj lista)
             caraComp
             anchoComp
             (> maderaComp 1e-6)
@@ -6357,8 +6377,15 @@
               (foreach tramo tramos
                 (setq z0 zBase)
                 (setq z1 (+ zBase tramo))
-                (setq pIni (_punto-por-angulo-dist ptBase angDir anchoModular))
-                (setq pFin (_punto-por-angulo-dist ptBase angDir anchoComp))
+                (setq piezas (_resolver-compensacion-solo-paneles anchoModular tramo))
+                (setq maderaInicio
+                  (if (and piezas (> (length piezas) 1))
+                    (_cat-ancho (car piezas))
+                    0.0
+                  )
+                )
+                (setq pIni (_punto-por-angulo-dist ptBase angDir maderaInicio))
+                (setq pFin (_punto-por-angulo-dist ptBase angDir (+ maderaInicio maderaComp)))
 
                 (setq col
                   (append
@@ -6366,15 +6393,15 @@
                       muro
                       caraComp
                       extremo
-                      anchoModular
-                      anchoComp
+                      maderaInicio
+                      (+ maderaInicio maderaComp)
                       pIni
                       pFin
                       z0
                       z1
                     )
                     (list
-                      (cons "OBLICUA" "SI")
+                      (cons "OBLICUA" (if (_ajuste-oblicuo-p aj lista) "SI" "NO"))
                       (cons "ORIGEN_COMPENSACION" "SI")
                     )
                   )
