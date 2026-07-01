@@ -1356,6 +1356,7 @@
             "\nID: "     (itoa (nth 0 item))
             " | HND: "   (_fmt-str  (nth 1 item))
             " | Long: "  (_fmt-real (nth 5 item))
+            " | Ang: "   (_fmt-ang-grados (nth 6 item))
             " | Esp: "   (_fmt-real (nth 7 item))
             " | Caras: " (_fmt-int  (nth 8 item))
             " | Ref: "   (_fmt-str  (nth 9 item))
