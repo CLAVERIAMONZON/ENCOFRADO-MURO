@@ -1549,15 +1549,9 @@
 )
 
 (defun _linea-cara-ajustada (muro res lista cara / d a b descIni descFin u)
-  ;; En esquinas oblicuas la compensacion se genera aparte.
-  ;; La cara exterior debe medirse desde la linea original para reservar
-  ;; la compensacion. La interior debe usar la interseccion real del angulo.
-  (setq d
-    (if (_cara-con-ajuste-oblicuo-exterior-p res lista cara)
-      (_muro-offset-linea muro)
-      (cdr (assoc "GEOM" res))
-    )
-  )
+  ;; Los rectos se miden sobre la geometria ajustada. En oblicuas, la
+  ;; compensacion exterior se genera aparte desde la linea original.
+  (setq d (cdr (assoc "GEOM" res)))
 
   (if d
     (progn
@@ -5719,12 +5713,7 @@
 )
 
 (defun _longitud-base-cara-muro (muro res lista cara / d a b)
-  (setq d
-    (if (_cara-con-ajuste-oblicuo-exterior-p res lista cara)
-      (_muro-offset-linea muro)
-      (cdr (assoc "GEOM" res))
-    )
-  )
+  (setq d (cdr (assoc "GEOM" res)))
 
   (if d
     (progn
@@ -7936,6 +7925,21 @@
   )
 )
 
+(defun _perfil-compensacion-oblicua-p (c / pieza)
+  (setq pieza (_col-pieza c))
+  (and
+    pieza
+    (= (_cat-tipo pieza) "PERFIL")
+    (= (_col-origen c) "COMPENSACION")
+    (= (_col-oblicua c) "SI")
+  )
+)
+
+(defun _correccion-perfil-compensacion-oblicua (c corr / n)
+  (setq n (_normal-tramo-colocacion c))
+  (_vec-add corr (_vec-scale n (- *def-espesor-chapa*)))
+)
+
 (defun _correccion-espesor-colocacion (c / cara n origen extremo muro ref corrOblicua)
   (setq cara    (_col-cara c))
   (setq n       (_normal-tramo-colocacion c))
@@ -7950,7 +7954,13 @@
        (= (_col-oblicua c) "SI")
      )
       (setq corrOblicua (_correccion-oblicua-compensacion c))
-      (if corrOblicua corrOblicua '(0.0 0.0 0.0))
+      (if (null corrOblicua)
+        (setq corrOblicua '(0.0 0.0 0.0))
+      )
+      (if (_perfil-compensacion-oblicua-p c)
+        (_correccion-perfil-compensacion-oblicua c corrOblicua)
+        corrOblicua
+      )
     )
 
     ; --------------------------------------------------
