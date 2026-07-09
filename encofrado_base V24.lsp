@@ -700,6 +700,19 @@
   (if v v "-")
 )
 
+(defun _fmt-vec2d (v)
+  (if v
+    (strcat
+      "("
+      (rtos (car v) 2 3)
+      ", "
+      (rtos (cadr v) 2 3)
+      ")"
+    )
+    "-"
+  )
+)
+
 ; =========================================================
 ; COLOCACIONES DE PIEZAS
 ; =========================================================
@@ -7886,58 +7899,30 @@
   (princ)
 )
 
-(defun _correccion-oblicua-compensacion (c / lista muro extremo e vInt n corr0 corr1 p0 centro0 centro1 espChapa)
+(defun _correccion-oblicua-compensacion (c / lista muro n nExt corr0 corr1 centro0 centro1 espChapa)
   (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
   (setq muro (_buscar-muro-por-id (_col-muro c) lista))
-  (setq extremo (_col-extremo c))
-  (setq e
-    (if (and muro extremo)
-      (_esquina-por-muro-extremo-cualquiera lista (_muro-id muro) extremo)
-      nil
-    )
-  )
-  (setq vInt
-    (if (and muro e extremo)
-      (_punto-interior-esquina muro lista extremo e)
-      nil
-    )
-  )
+  (setq n (_normal-tramo-colocacion c))
+  (setq nExt (if muro (_normal-exterior-cara muro (_col-cara c)) nil))
 
-  (if vInt
+  (if (and nExt (/= (_2d-dot nExt nExt) 0.0))
     (progn
-      (setq n (_normal-tramo-colocacion c))
-      (setq p0 (_col-p0 c))
       (setq espChapa *def-espesor-chapa*)
       (setq corr0 '(0.0 0.0 0.0))
       (setq corr1 (_vec-scale n espChapa))
 
       ;; Los bloques desarrollan el espesor hacia la derecha de su eje local.
-      ;; Probamos las dos aristas posibles y dejamos fuera la que aleja mas el centro del vertice interior.
-      (setq centro0 (_vec-add p0 (_vec-scale n (- (/ espChapa 2.0)))))
-      (setq centro1 (_vec-add (_vec-add p0 corr1) (_vec-scale n (- (/ espChapa 2.0)))))
+      ;; Elegimos la arista que deja el centro fisico hacia la normal exterior de la cara.
+      (setq centro0 (_vec-scale n (- (/ espChapa 2.0))))
+      (setq centro1 (_vec-scale n (/ espChapa 2.0)))
 
-      (if (>= (distance centro0 vInt) (distance centro1 vInt))
+      (if (>= (_2d-dot centro0 nExt) (_2d-dot centro1 nExt))
         corr0
         corr1
       )
     )
     nil
   )
-)
-
-(defun _perfil-compensacion-oblicua-p (c / pieza)
-  (setq pieza (_col-pieza c))
-  (and
-    pieza
-    (= (_cat-tipo pieza) "PERFIL")
-    (= (_col-origen c) "COMPENSACION")
-    (= (_col-oblicua c) "SI")
-  )
-)
-
-(defun _correccion-perfil-compensacion-oblicua (c corr / n)
-  (setq n (_normal-tramo-colocacion c))
-  (_vec-add corr (_vec-scale n (- *def-espesor-chapa*)))
 )
 
 (defun _correccion-espesor-colocacion (c / cara n origen extremo muro ref corrOblicua)
@@ -7957,10 +7942,7 @@
       (if (null corrOblicua)
         (setq corrOblicua '(0.0 0.0 0.0))
       )
-      (if (_perfil-compensacion-oblicua-p c)
-        (_correccion-perfil-compensacion-oblicua c corrOblicua)
-        corrOblicua
-      )
+      corrOblicua
     )
 
     ; --------------------------------------------------
@@ -8177,6 +8159,26 @@
   )
 )
 
+(defun _debug-correccion-colocacion (c / lista muro n nExt corr esp centro0 centro1 d0 d1)
+  (setq lista (mapcar '(lambda (x) (_actualizar-geometria-muro x)) *MUROS*))
+  (setq muro (_buscar-muro-por-id (_col-muro c) lista))
+  (setq n (_normal-tramo-colocacion c))
+  (setq nExt (if muro (_normal-exterior-cara muro (_col-cara c)) nil))
+  (setq corr (_correccion-espesor-colocacion c))
+  (setq esp *def-espesor-chapa*)
+  (setq centro0 (_vec-scale n (- (/ esp 2.0))))
+  (setq centro1 (_vec-scale n (/ esp 2.0)))
+  (setq d0 (if nExt (_2d-dot centro0 nExt) nil))
+  (setq d1 (if nExt (_2d-dot centro1 nExt) nil))
+  (strcat
+    "\n    N_BLOQUE=" (_fmt-vec2d n)
+    " | N_EXTERIOR=" (_fmt-vec2d nExt)
+    " | CORR=" (_fmt-vec2d corr)
+    "\n    LADO_0=" (_fmt-real d0)
+    " | LADO_1=" (_fmt-real d1)
+  )
+)
+
 (defun _tipo-cara-en-ajuste (aj cara)
   (if aj
     (cond
@@ -8383,6 +8385,7 @@
 			    " | P1=" (_fmt-pt2d (_col-p1 c))
 
 			    "\n    PTO INSERCION=" (_fmt-pt2d ptIns)
+			    (_debug-correccion-colocacion c)
 
 			    "\n    ANG(rad)=" (rtos angIns 2 4)
 			    " | ANG(grados)=" (_fmt-ang-grados angIns)
@@ -8435,6 +8438,7 @@
 			    " | P1=" (_fmt-pt2d (_col-p1 c))
 
 			    "\n    PTO INSERCION=" (_fmt-pt2d ptIns)
+			    (_debug-correccion-colocacion c)
 
 			    "\n    ANG(rad)=" (rtos angIns 2 4)
 			    " | ANG(grados)=" (_fmt-ang-grados angIns)
